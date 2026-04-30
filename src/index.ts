@@ -220,6 +220,48 @@ export type MediaTelephonySerializer = {
 	serialize: (frame: MediaFrame) => MediaTelephonyEnvelope;
 };
 
+export type MediaTelephonyStreamEventKind =
+	| 'connected'
+	| 'error'
+	| 'media'
+	| 'start'
+	| 'stop'
+	| 'unknown';
+
+export type MediaTelephonyStreamEvent = {
+	audioBytes: number;
+	at?: number;
+	carrier: MediaTelephonyCarrier | (string & {});
+	direction: MediaTelephonyFrameDirection;
+	error?: string;
+	kind: MediaTelephonyStreamEventKind;
+	sequenceNumber?: number | string;
+	streamId?: string;
+};
+
+export type MediaTelephonyStreamLifecycleInput = {
+	carrier?: MediaTelephonyCarrier | (string & {});
+	envelopes?: readonly MediaTelephonyEnvelope[];
+	maxMissingStop?: boolean;
+	minAudioBytes?: number;
+	requireMedia?: boolean;
+	requireStart?: boolean;
+	requireStop?: boolean;
+};
+
+export type MediaTelephonyStreamLifecycleReport = {
+	audioBytes: number;
+	carrier?: MediaTelephonyCarrier | (string & {});
+	checkedAt: number;
+	events: readonly MediaTelephonyStreamEvent[];
+	issues: MediaPipelineCalibrationIssue[];
+	mediaEvents: number;
+	started: boolean;
+	status: MediaPipelineStatus;
+	stopped: boolean;
+	streamIds: readonly string[];
+};
+
 export type MediaPipelineCalibrationInput = {
 	expectedInputFormat?: AudioFormat;
 	expectedOutputFormat?: AudioFormat;
@@ -586,6 +628,36 @@ const telephonyFrameKind = (
 ): MediaFrameKind =>
 	direction === 'outbound' ? 'assistant-audio' : 'input-audio';
 
+const telephonyEventKind = (
+	envelope: MediaTelephonyEnvelope
+): MediaTelephonyStreamEventKind => {
+	const raw =
+		firstString([envelope], ['event', 'type', 'eventType']) ??
+		firstString([unknownRecord(envelope.message)], ['event', 'type']);
+	const normalized = raw?.toLowerCase().replace(/[_\s-]+/g, '-');
+
+	if (!normalized) {
+		return 'unknown';
+	}
+	if (normalized.includes('connected')) {
+		return 'connected';
+	}
+	if (normalized.includes('start')) {
+		return 'start';
+	}
+	if (normalized.includes('media')) {
+		return 'media';
+	}
+	if (normalized.includes('stop') || normalized.includes('closed')) {
+		return 'stop';
+	}
+	if (normalized.includes('error') || normalized.includes('failed')) {
+		return 'error';
+	}
+
+	return 'unknown';
+};
+
 const normalizeWebRTCStat = (stat: RTCStats): MediaWebRTCStatsSample => {
 	const sample: MediaWebRTCStatsSample = {};
 
@@ -756,6 +828,158 @@ export const createTelephonyMediaSerializer = (input: {
 				frame,
 				streamId: input.streamId
 			})
+	};
+};
+
+export const parseTelephonyStreamEvent = (input: {
+	carrier?: MediaTelephonyCarrier | (string & {});
+	envelope: MediaTelephonyEnvelope;
+	format?: AudioFormat;
+	sessionId?: string;
+}): MediaTelephonyStreamEvent => {
+	const envelope = input.envelope;
+	const media = unknownRecord(envelope.media);
+	const start = unknownRecord(envelope.start);
+	const stop = unknownRecord(envelope.stop);
+	const errorRecord = unknownRecord(envelope.error);
+	const kind = telephonyEventKind(envelope);
+	const carrier =
+		input.carrier ?? firstString([envelope], ['provider', 'carrier']) ?? 'telephony';
+	const frame =
+		kind === 'media'
+			? parseTelephonyMediaFrame({
+					carrier,
+					envelope,
+					format: input.format,
+					sessionId: input.sessionId
+				})
+			: undefined;
+	const streamId =
+		firstString(
+			[media, start, stop, envelope],
+			['streamSid', 'stream_id', 'streamId', 'callSid', 'call_id']
+		) ?? input.sessionId;
+	const sequenceNumber = firstString(
+		[media, envelope],
+		['sequenceNumber', 'sequence_number', 'chunk']
+	);
+	const track = firstString([media, envelope], ['track', 'direction']);
+
+	return {
+		audioBytes: frame?.audio
+			? frame.audio instanceof ArrayBuffer
+				? frame.audio.byteLength
+				: frame.audio.byteLength
+			: 0,
+		at:
+			frame?.at ??
+			firstNumber([media, start, stop, envelope], ['timestamp', 'time', 'startedAt']),
+		carrier,
+		direction: telephonyDirection(track),
+		error: firstString([errorRecord, envelope], ['message', 'error', 'reason']),
+		kind,
+		sequenceNumber,
+		streamId
+	};
+};
+
+export const buildMediaTelephonyStreamLifecycleReport = (
+	input: MediaTelephonyStreamLifecycleInput = {}
+): MediaTelephonyStreamLifecycleReport => {
+	const envelopes = input.envelopes ?? [];
+	const events = envelopes.map((envelope) =>
+		parseTelephonyStreamEvent({
+			carrier: input.carrier,
+			envelope
+		})
+	);
+	const issues: MediaPipelineCalibrationIssue[] = [];
+	const startedIndex = events.findIndex((event) => event.kind === 'start');
+	const firstMediaIndex = events.findIndex((event) => event.kind === 'media');
+	const stoppedIndex = events.findIndex((event) => event.kind === 'stop');
+	const started = startedIndex >= 0;
+	const stopped = stoppedIndex >= 0;
+	const mediaEvents = events.filter((event) => event.kind === 'media');
+	const audioBytes = events.reduce((total, event) => total + event.audioBytes, 0);
+	const minAudioBytes = input.minAudioBytes ?? 1;
+	const streamIds = Array.from(
+		new Set(events.map((event) => event.streamId).filter(Boolean) as string[])
+	);
+
+	if ((input.requireStart ?? true) && !started) {
+		pushIssue(
+			issues,
+			'error',
+			'media.telephony_missing_start',
+			'Telephony media stream did not include a start event.'
+		);
+	}
+	if ((input.requireMedia ?? true) && mediaEvents.length === 0) {
+		pushIssue(
+			issues,
+			'error',
+			'media.telephony_missing_media',
+			'Telephony media stream did not include media payload events.'
+		);
+	}
+	if ((input.requireStop ?? true) && !stopped) {
+		pushIssue(
+			issues,
+			input.maxMissingStop === false ? 'warning' : 'error',
+			'media.telephony_missing_stop',
+			'Telephony media stream did not include a stop event.'
+		);
+	}
+	if (started && firstMediaIndex >= 0 && firstMediaIndex < startedIndex) {
+		pushIssue(
+			issues,
+			'error',
+			'media.telephony_media_before_start',
+			'Telephony media payload arrived before the stream start event.'
+		);
+	}
+	if (stopped && firstMediaIndex >= 0 && stoppedIndex < firstMediaIndex) {
+		pushIssue(
+			issues,
+			'error',
+			'media.telephony_stop_before_media',
+			'Telephony media stream stopped before any media payload arrived.'
+		);
+	}
+	if (mediaEvents.length > 0 && audioBytes < minAudioBytes) {
+		pushIssue(
+			issues,
+			'error',
+			'media.telephony_no_audio_bytes',
+			`Telephony media stream parsed ${String(audioBytes)} audio byte(s), below required ${String(minAudioBytes)}.`
+		);
+	}
+	for (const event of events) {
+		if (event.kind === 'error') {
+			pushIssue(
+				issues,
+				'error',
+				'media.telephony_stream_error',
+				event.error ?? 'Telephony media stream emitted an error event.'
+			);
+		}
+	}
+
+	return {
+		audioBytes,
+		carrier: input.carrier,
+		checkedAt: Date.now(),
+		events,
+		issues,
+		mediaEvents: mediaEvents.length,
+		started,
+		status: issues.some((issue) => issue.severity === 'error')
+			? 'fail'
+			: issues.length > 0
+				? 'warn'
+				: 'pass',
+		stopped,
+		streamIds
 	};
 };
 

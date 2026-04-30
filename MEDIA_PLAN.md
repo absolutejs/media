@@ -35,7 +35,7 @@ Future package splits are only justified if the surface becomes independently us
 
 ## Current Surface
 
-Published package: `@absolutejs/media@0.0.1-beta.6`
+Published package: `@absolutejs/media@0.0.1-beta.7`
 
 Current primitives:
 
@@ -152,7 +152,7 @@ Acceptance criteria:
 
 Why this matters: Twilio/Telnyx/Plivo/Vonage media streams use carrier-specific event envelopes but the media serialization problem is generic.
 
-Status: first generic serializer layer shipped in `@absolutejs/media@0.0.1-beta.6` with carrier-flexible parse/serialize helpers for Twilio, Telnyx, and Plivo media envelopes. Remaining work is voice consumption in phone-agent media proof, carrier setup proof, telephony operations records, and deeper carrier event coverage beyond media payload packets.
+Status: first generic serializer layer shipped in `@absolutejs/media@0.0.1-beta.6` with carrier-flexible parse/serialize helpers for Twilio, Telnyx, and Plivo media envelopes. Stream lifecycle reporting shipped in `@absolutejs/media@0.0.1-beta.7` with start/media/stop/error event parsing, byte-flow checks, and sequencing issues. Remaining work is voice consumption in phone-agent media proof, carrier setup proof, telephony operations records, and deeper carrier event coverage beyond media payload packets.
 
 Deliverables:
 
