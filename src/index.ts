@@ -320,6 +320,23 @@ export type MediaWebRTCStatsInput = {
 	stats?: readonly MediaWebRTCStatsSample[];
 };
 
+export type MediaWebRTCStatsCollector = {
+	getStats: (
+		selector?: MediaStreamTrack | null
+	) => Promise<RTCStatsReport> | RTCStatsReport;
+};
+
+export type MediaWebRTCStatsCollectionInput = {
+	peerConnection: MediaWebRTCStatsCollector;
+	selector?: MediaStreamTrack | null;
+};
+
+export type MediaWebRTCStatsReportInput = Omit<
+	MediaWebRTCStatsInput,
+	'stats'
+> &
+	MediaWebRTCStatsCollectionInput;
+
 export type MediaWebRTCStatsReport = {
 	activeCandidatePairs: number;
 	audioLevelAverage?: number;
@@ -405,6 +422,25 @@ const stringStat = (
 
 const secondsToMs = (value: number | undefined): number | undefined =>
 	value === undefined ? undefined : value * 1000;
+
+const normalizeWebRTCStat = (stat: RTCStats): MediaWebRTCStatsSample => {
+	const sample: MediaWebRTCStatsSample = {};
+
+	for (const [key, value] of Object.entries(
+		stat as unknown as Record<string, unknown>
+	)) {
+		if (
+			value === null ||
+			typeof value === 'boolean' ||
+			typeof value === 'number' ||
+			typeof value === 'string'
+		) {
+			sample[key] = value;
+		}
+	}
+
+	return sample;
+};
 
 export const createMediaFrame = (
 	frame: MediaFrame
@@ -1177,6 +1213,25 @@ export const buildMediaWebRTCStatsReport = (
 				: 'pass',
 		totalStats: stats.length
 	};
+};
+
+export const collectMediaWebRTCStats = async (
+	input: MediaWebRTCStatsCollectionInput
+): Promise<readonly MediaWebRTCStatsSample[]> => {
+	const report = await input.peerConnection.getStats(input.selector ?? null);
+
+	return [...report.values()].map(normalizeWebRTCStat);
+};
+
+export const collectMediaWebRTCStatsReport = async (
+	input: MediaWebRTCStatsReportInput
+): Promise<MediaWebRTCStatsReport> => {
+	const stats = await collectMediaWebRTCStats(input);
+
+	return buildMediaWebRTCStatsReport({
+		...input,
+		stats
+	});
 };
 
 export const buildMediaPipelineCalibrationReport = (
