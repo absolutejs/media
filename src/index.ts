@@ -193,6 +193,33 @@ export type MediaTransportOptions = {
 	outputFormat?: AudioFormat;
 };
 
+export type MediaTelephonyCarrier = 'plivo' | 'telnyx' | 'twilio';
+
+export type MediaTelephonyEnvelope = Record<string, unknown>;
+
+export type MediaTelephonyFrameDirection = 'inbound' | 'outbound' | 'unknown';
+
+export type MediaTelephonyParseInput = {
+	carrier?: MediaTelephonyCarrier | (string & {});
+	envelope: MediaTelephonyEnvelope;
+	format?: AudioFormat;
+	sessionId?: string;
+};
+
+export type MediaTelephonySerializeInput = {
+	carrier?: MediaTelephonyCarrier | (string & {});
+	frame: MediaFrame;
+	sequenceNumber?: number | string;
+	streamId?: string;
+};
+
+export type MediaTelephonySerializer = {
+	carrier: MediaTelephonyCarrier | (string & {});
+	format: AudioFormat;
+	parse: (envelope: MediaTelephonyEnvelope) => MediaFrame | undefined;
+	serialize: (frame: MediaFrame) => MediaTelephonyEnvelope;
+};
+
 export type MediaPipelineCalibrationInput = {
 	expectedInputFormat?: AudioFormat;
 	expectedOutputFormat?: AudioFormat;
@@ -466,6 +493,99 @@ const statKey = (stat: MediaWebRTCStatsSample): string =>
 const secondsToMs = (value: number | undefined): number | undefined =>
 	value === undefined ? undefined : value * 1000;
 
+const DEFAULT_TELEPHONY_FORMAT: AudioFormat = {
+	channels: 1,
+	container: 'raw',
+	encoding: 'mulaw',
+	sampleRateHz: 8000
+};
+
+const bytesToBase64 = (audio: ArrayBuffer | ArrayBufferView): string => {
+	const bytes =
+		audio instanceof ArrayBuffer
+			? new Uint8Array(audio)
+			: new Uint8Array(audio.buffer, audio.byteOffset, audio.byteLength);
+
+	return Buffer.from(bytes).toString('base64');
+};
+
+const base64ToBytes = (value: string): Uint8Array =>
+	new Uint8Array(Buffer.from(value, 'base64'));
+
+const unknownRecord = (value: unknown): Record<string, unknown> =>
+	value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+
+const firstString = (
+	records: readonly Record<string, unknown>[],
+	keys: readonly string[]
+): string | undefined => {
+	for (const record of records) {
+		for (const key of keys) {
+			const value = record[key];
+			if (typeof value === 'string' && value.length > 0) {
+				return value;
+			}
+			if (typeof value === 'number' && Number.isFinite(value)) {
+				return String(value);
+			}
+		}
+	}
+
+	return undefined;
+};
+
+const firstNumber = (
+	records: readonly Record<string, unknown>[],
+	keys: readonly string[]
+): number | undefined => {
+	for (const record of records) {
+		for (const key of keys) {
+			const value = record[key];
+			if (typeof value === 'number' && Number.isFinite(value)) {
+				return value;
+			}
+			if (typeof value === 'string') {
+				const parsed = Number(value);
+				if (Number.isFinite(parsed)) {
+					return parsed;
+				}
+			}
+		}
+	}
+
+	return undefined;
+};
+
+const telephonyDirection = (
+	track: string | undefined
+): MediaTelephonyFrameDirection => {
+	const normalized = track?.toLowerCase();
+	if (!normalized) {
+		return 'unknown';
+	}
+	if (
+		normalized.includes('inbound') ||
+		normalized.includes('caller') ||
+		normalized.includes('in')
+	) {
+		return 'inbound';
+	}
+	if (
+		normalized.includes('outbound') ||
+		normalized.includes('assistant') ||
+		normalized.includes('out')
+	) {
+		return 'outbound';
+	}
+
+	return 'unknown';
+};
+
+const telephonyFrameKind = (
+	direction: MediaTelephonyFrameDirection
+): MediaFrameKind =>
+	direction === 'outbound' ? 'assistant-audio' : 'input-audio';
+
 const normalizeWebRTCStat = (stat: RTCStats): MediaWebRTCStatsSample => {
 	const sample: MediaWebRTCStatsSample = {};
 
@@ -488,6 +608,156 @@ const normalizeWebRTCStat = (stat: RTCStats): MediaWebRTCStatsSample => {
 export const createMediaFrame = (
 	frame: MediaFrame
 ): MediaFrame => frame;
+
+export const parseTelephonyMediaFrame = (
+	input: MediaTelephonyParseInput
+): MediaFrame | undefined => {
+	const envelope = input.envelope;
+	const media = unknownRecord(envelope.media);
+	const payload =
+		firstString([media, envelope], ['payload', 'audio', 'data']) ??
+		firstString([unknownRecord(envelope.message)], ['payload']);
+
+	if (!payload) {
+		return undefined;
+	}
+
+	const carrier = input.carrier ?? firstString([envelope], ['provider']) ?? 'telephony';
+	const streamId = firstString(
+		[media, envelope],
+		['streamSid', 'stream_id', 'streamId', 'streamId', 'callSid', 'call_id']
+	);
+	const sequenceNumber = firstString(
+		[media, envelope],
+		['sequenceNumber', 'sequence_number', 'chunk']
+	);
+	const track = firstString([media, envelope], ['track', 'direction']);
+	const direction = telephonyDirection(track);
+	const timestamp = firstNumber(
+		[media, envelope],
+		['timestamp', 'time', 'startedAt']
+	);
+
+	return {
+		at: timestamp,
+		audio: base64ToBytes(payload),
+		format: input.format ?? DEFAULT_TELEPHONY_FORMAT,
+		id: [
+			carrier,
+			streamId ?? input.sessionId ?? 'stream',
+			sequenceNumber ?? timestamp ?? Date.now()
+		].join(':'),
+		kind: telephonyFrameKind(direction),
+		metadata: {
+			carrier,
+			direction,
+			event: firstString([envelope], ['event', 'type']),
+			sequenceNumber,
+			streamId,
+			track
+		},
+		sessionId: input.sessionId ?? streamId,
+		source: 'telephony'
+	};
+};
+
+export const serializeTelephonyMediaFrame = (
+	input: MediaTelephonySerializeInput
+): MediaTelephonyEnvelope => {
+	const carrier = input.carrier ?? input.frame.metadata?.carrier ?? 'telephony';
+	const streamId =
+		input.streamId ??
+		(typeof input.frame.metadata?.streamId === 'string'
+			? input.frame.metadata.streamId
+			: input.frame.sessionId);
+	const sequenceNumber =
+		input.sequenceNumber ??
+		(typeof input.frame.metadata?.sequenceNumber === 'string' ||
+		typeof input.frame.metadata?.sequenceNumber === 'number'
+			? input.frame.metadata.sequenceNumber
+			: undefined);
+	const direction =
+		input.frame.kind === 'assistant-audio' ? 'outbound' : 'inbound';
+	const payload = input.frame.audio ? bytesToBase64(input.frame.audio) : '';
+
+	if (carrier === 'twilio') {
+		return {
+			event: 'media',
+			sequenceNumber,
+			streamSid: streamId,
+			media: {
+				payload,
+				timestamp: input.frame.at,
+				track: direction
+			}
+		};
+	}
+
+	if (carrier === 'telnyx') {
+		return {
+			event: 'media',
+			stream_id: streamId,
+			sequence_number: sequenceNumber,
+			media: {
+				payload,
+				timestamp: input.frame.at,
+				track: direction
+			}
+		};
+	}
+
+	if (carrier === 'plivo') {
+		return {
+			event: 'media',
+			streamId,
+			sequenceNumber,
+			media: {
+				payload,
+				timestamp: input.frame.at,
+				track: direction
+			}
+		};
+	}
+
+	return {
+		event: 'media',
+		provider: carrier,
+		sequenceNumber,
+		streamId,
+		media: {
+			payload,
+			timestamp: input.frame.at,
+			track: direction
+		}
+	};
+};
+
+export const createTelephonyMediaSerializer = (input: {
+	carrier: MediaTelephonyCarrier | (string & {});
+	format?: AudioFormat;
+	sessionId?: string;
+	streamId?: string;
+}): MediaTelephonySerializer => {
+	const format = input.format ?? DEFAULT_TELEPHONY_FORMAT;
+
+	return {
+		carrier: input.carrier,
+		format,
+		parse: (envelope) =>
+			parseTelephonyMediaFrame({
+				carrier: input.carrier,
+				envelope,
+				format,
+				sessionId: input.sessionId ?? input.streamId
+			}),
+		serialize: (frame) =>
+			serializeTelephonyMediaFrame({
+				carrier: input.carrier,
+				frame,
+				streamId: input.streamId
+			})
+	};
+};
 
 export const buildMediaTransportReport = (input: {
 	events?: readonly MediaTransportEvent[];

@@ -35,7 +35,7 @@ Future package splits are only justified if the surface becomes independently us
 
 ## Current Surface
 
-Published package: `@absolutejs/media@0.0.1-beta.5`
+Published package: `@absolutejs/media@0.0.1-beta.6`
 
 Current primitives:
 
@@ -55,6 +55,9 @@ Current primitives:
 - `collectMediaWebRTCStats(...)`
 - `collectMediaWebRTCStatsReport(...)`
 - `buildMediaWebRTCStreamContinuityReport(...)`
+- `parseTelephonyMediaFrame(...)`
+- `serializeTelephonyMediaFrame(...)`
+- `createTelephonyMediaSerializer(...)`
 
 Current proof consumption:
 
@@ -149,12 +152,14 @@ Acceptance criteria:
 
 Why this matters: Twilio/Telnyx/Plivo/Vonage media streams use carrier-specific event envelopes but the media serialization problem is generic.
 
+Status: first generic serializer layer shipped in `@absolutejs/media@0.0.1-beta.6` with carrier-flexible parse/serialize helpers for Twilio, Telnyx, and Plivo media envelopes. Remaining work is voice consumption in phone-agent media proof, carrier setup proof, telephony operations records, and deeper carrier event coverage beyond media payload packets.
+
 Deliverables:
 
-- Generic serializer interface for external media stream envelopes.
-- Twilio media stream parser/serializer.
-- Telnyx media stream parser/serializer.
-- Plivo media stream parser/serializer.
+- Generic serializer interface for external media stream envelopes. Status: shipped.
+- Twilio media stream parser/serializer. Status: shipped for media packets.
+- Telnyx media stream parser/serializer. Status: shipped for media packets.
+- Plivo media stream parser/serializer. Status: shipped for media packets.
 - Vonage/Exotel roadmap placeholders only if docs and demand justify them.
 - Codec/sample-rate metadata normalization.
 - Voice consumption: `@absolutejs/voice` should use serializers in phone-agent media proof, carrier setup proof, and telephony operations records.
