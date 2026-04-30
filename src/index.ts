@@ -357,6 +357,39 @@ export type MediaWebRTCStatsReport = {
 	totalStats: number;
 };
 
+export type MediaWebRTCStreamContinuityInput = {
+	maxGapMs?: number;
+	maxInboundPacketStallMs?: number;
+	maxOutboundPacketStallMs?: number;
+	previousStats?: readonly MediaWebRTCStatsSample[];
+	requireInboundAudio?: boolean;
+	requireOutboundAudio?: boolean;
+	stats?: readonly MediaWebRTCStatsSample[];
+};
+
+export type MediaWebRTCStreamContinuityStream = {
+	bytesDelta?: number;
+	currentPackets?: number;
+	direction: 'inbound' | 'outbound';
+	id: string;
+	packetDelta?: number;
+	previousPackets?: number;
+	timeDeltaMs?: number;
+};
+
+export type MediaWebRTCStreamContinuityReport = {
+	checkedAt: number;
+	inboundAudioStreams: number;
+	issues: MediaPipelineCalibrationIssue[];
+	maxObservedGapMs?: number;
+	outboundAudioStreams: number;
+	stalledInboundStreams: number;
+	stalledOutboundStreams: number;
+	status: MediaPipelineStatus;
+	streams: readonly MediaWebRTCStreamContinuityStream[];
+	totalStats: number;
+};
+
 const formatLabel = (format: AudioFormat) =>
 	`${format.container}/${format.encoding}/${String(format.sampleRateHz)}hz/${String(format.channels)}ch`;
 
@@ -419,6 +452,16 @@ const stringStat = (
 	const value = stat[key];
 	return typeof value === 'string' ? value : undefined;
 };
+
+const statKey = (stat: MediaWebRTCStatsSample): string =>
+	String(
+		stat.id ??
+			stringStat(stat, 'ssrc') ??
+			numericStat(stat, 'ssrc') ??
+			stringStat(stat, 'trackIdentifier') ??
+			stringStat(stat, 'mid') ??
+			'unknown'
+	);
 
 const secondsToMs = (value: number | undefined): number | undefined =>
 	value === undefined ? undefined : value * 1000;
@@ -1232,6 +1275,141 @@ export const collectMediaWebRTCStatsReport = async (
 		...input,
 		stats
 	});
+};
+
+export const buildMediaWebRTCStreamContinuityReport = (
+	input: MediaWebRTCStreamContinuityInput = {}
+): MediaWebRTCStreamContinuityReport => {
+	const stats = input.stats ?? [];
+	const previousStats = input.previousStats ?? [];
+	const issues: MediaPipelineCalibrationIssue[] = [];
+	const previousByKey = new Map(
+		previousStats.map((stat) => [statKey(stat), stat])
+	);
+	const audioRtp = stats.filter(
+		(stat) =>
+			(stat.type === 'inbound-rtp' || stat.type === 'outbound-rtp') &&
+			stringStat(stat, 'kind') !== 'video' &&
+			stringStat(stat, 'mediaType') !== 'video'
+	);
+	const streams = audioRtp.map((stat) => {
+		const direction = stat.type === 'outbound-rtp' ? 'outbound' : 'inbound';
+		const packetsKey =
+			direction === 'outbound' ? 'packetsSent' : 'packetsReceived';
+		const bytesKey = direction === 'outbound' ? 'bytesSent' : 'bytesReceived';
+		const previous = previousByKey.get(statKey(stat));
+		const currentPackets = numericStat(stat, packetsKey);
+		const previousPackets = previous
+			? numericStat(previous, packetsKey)
+			: undefined;
+		const currentBytes = numericStat(stat, bytesKey);
+		const previousBytes = previous ? numericStat(previous, bytesKey) : undefined;
+		const timeDeltaMs =
+			stat.timestamp !== undefined && previous?.timestamp !== undefined
+				? stat.timestamp - previous.timestamp
+				: undefined;
+
+		return {
+			bytesDelta:
+				currentBytes !== undefined && previousBytes !== undefined
+					? currentBytes - previousBytes
+					: undefined,
+			currentPackets,
+			direction,
+			id: statKey(stat),
+			packetDelta:
+				currentPackets !== undefined && previousPackets !== undefined
+					? currentPackets - previousPackets
+					: undefined,
+			previousPackets,
+			timeDeltaMs
+		} satisfies MediaWebRTCStreamContinuityStream;
+	});
+	const inbound = streams.filter((stream) => stream.direction === 'inbound');
+	const outbound = streams.filter((stream) => stream.direction === 'outbound');
+	const maxObservedGapMs = max(
+		streams
+			.map((stream) => stream.timeDeltaMs)
+			.filter((value): value is number => value !== undefined)
+	);
+	const stalledInboundStreams = inbound.filter(
+		(stream) =>
+			input.maxInboundPacketStallMs !== undefined &&
+			stream.timeDeltaMs !== undefined &&
+			stream.timeDeltaMs >= input.maxInboundPacketStallMs &&
+			stream.packetDelta !== undefined &&
+			stream.packetDelta <= 0
+	).length;
+	const stalledOutboundStreams = outbound.filter(
+		(stream) =>
+			input.maxOutboundPacketStallMs !== undefined &&
+			stream.timeDeltaMs !== undefined &&
+			stream.timeDeltaMs >= input.maxOutboundPacketStallMs &&
+			stream.packetDelta !== undefined &&
+			stream.packetDelta <= 0
+	).length;
+
+	if (input.requireInboundAudio && inbound.length === 0) {
+		pushIssue(
+			issues,
+			'error',
+			'media.webrtc_inbound_audio_missing',
+			'No inbound WebRTC audio RTP stream was observed.'
+		);
+	}
+	if (input.requireOutboundAudio && outbound.length === 0) {
+		pushIssue(
+			issues,
+			'error',
+			'media.webrtc_outbound_audio_missing',
+			'No outbound WebRTC audio RTP stream was observed.'
+		);
+	}
+	if (
+		input.maxGapMs !== undefined &&
+		maxObservedGapMs !== undefined &&
+		maxObservedGapMs > input.maxGapMs
+	) {
+		pushIssue(
+			issues,
+			'warning',
+			'media.webrtc_stream_gap',
+			`Observed WebRTC stream sample gap ${String(maxObservedGapMs)}ms above ${String(input.maxGapMs)}ms.`
+		);
+	}
+	if (stalledInboundStreams > 0) {
+		pushIssue(
+			issues,
+			'error',
+			'media.webrtc_inbound_stalled',
+			`${String(stalledInboundStreams)} inbound WebRTC audio stream(s) stopped receiving packets.`
+		);
+	}
+	if (stalledOutboundStreams > 0) {
+		pushIssue(
+			issues,
+			'error',
+			'media.webrtc_outbound_stalled',
+			`${String(stalledOutboundStreams)} outbound WebRTC audio stream(s) stopped sending packets.`
+		);
+	}
+
+	return {
+		checkedAt: Date.now(),
+		inboundAudioStreams: inbound.length,
+		issues,
+		maxObservedGapMs,
+		outboundAudioStreams: outbound.length,
+		stalledInboundStreams,
+		stalledOutboundStreams,
+		status: issues.some((issue) => issue.severity === 'error')
+			? 'fail'
+			: issues.length > 0
+				? 'warn'
+				: 'pass',
+		streams,
+		totalStats: stats.length
+	};
 };
 
 export const buildMediaPipelineCalibrationReport = (

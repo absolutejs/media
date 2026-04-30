@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
 	buildMediaWebRTCStatsReport,
+	buildMediaWebRTCStreamContinuityReport,
 	collectMediaWebRTCStats,
 	collectMediaWebRTCStatsReport
 } from '../src';
@@ -208,5 +209,100 @@ describe('webrtc stats', () => {
 		expect(report.liveAudioTracks).toBe(1);
 		expect(report.roundTripTimeMs).toBe(50);
 		expect(report.totalStats).toBe(4);
+	});
+
+	test('reports passing WebRTC stream continuity', () => {
+		const report = buildMediaWebRTCStreamContinuityReport({
+			maxGapMs: 3000,
+			maxInboundPacketStallMs: 3000,
+			maxOutboundPacketStallMs: 3000,
+			previousStats: [
+				{
+					bytesReceived: 10_000,
+					id: 'inbound-audio',
+					kind: 'audio',
+					packetsReceived: 100,
+					timestamp: 1000,
+					type: 'inbound-rtp'
+				},
+				{
+					bytesSent: 9000,
+					id: 'outbound-audio',
+					kind: 'audio',
+					packetsSent: 100,
+					timestamp: 1000,
+					type: 'outbound-rtp'
+				}
+			],
+			requireInboundAudio: true,
+			requireOutboundAudio: true,
+			stats: [
+				{
+					bytesReceived: 12_000,
+					id: 'inbound-audio',
+					kind: 'audio',
+					packetsReceived: 140,
+					timestamp: 2000,
+					type: 'inbound-rtp'
+				},
+				{
+					bytesSent: 11_000,
+					id: 'outbound-audio',
+					kind: 'audio',
+					packetsSent: 145,
+					timestamp: 2000,
+					type: 'outbound-rtp'
+				}
+			]
+		});
+
+		expect(report.status).toBe('pass');
+		expect(report.inboundAudioStreams).toBe(1);
+		expect(report.outboundAudioStreams).toBe(1);
+		expect(report.maxObservedGapMs).toBe(1000);
+		expect(report.stalledInboundStreams).toBe(0);
+		expect(report.streams.map((stream) => stream.packetDelta)).toEqual([
+			40, 45
+		]);
+	});
+
+	test('fails WebRTC stream continuity gaps and stalls', () => {
+		const report = buildMediaWebRTCStreamContinuityReport({
+			maxGapMs: 3000,
+			maxInboundPacketStallMs: 3000,
+			previousStats: [
+				{
+					bytesReceived: 10_000,
+					id: 'inbound-audio',
+					kind: 'audio',
+					packetsReceived: 100,
+					timestamp: 1000,
+					type: 'inbound-rtp'
+				}
+			],
+			requireInboundAudio: true,
+			requireOutboundAudio: true,
+			stats: [
+				{
+					bytesReceived: 10_000,
+					id: 'inbound-audio',
+					kind: 'audio',
+					packetsReceived: 100,
+					timestamp: 6000,
+					type: 'inbound-rtp'
+				}
+			]
+		});
+
+		expect(report.status).toBe('fail');
+		expect(report.maxObservedGapMs).toBe(5000);
+		expect(report.stalledInboundStreams).toBe(1);
+		expect(report.issues.map((issue) => issue.code)).toEqual(
+			expect.arrayContaining([
+				'media.webrtc_outbound_audio_missing',
+				'media.webrtc_stream_gap',
+				'media.webrtc_inbound_stalled'
+			])
+		);
 	});
 });
