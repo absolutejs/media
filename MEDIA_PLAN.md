@@ -35,7 +35,7 @@ Future package splits are only justified if the surface becomes independently us
 
 ## Current Surface
 
-Published package: `@absolutejs/media@0.0.1-beta.2`
+Published package: `@absolutejs/media@0.0.1-beta.3`
 
 Current primitives:
 
@@ -51,12 +51,13 @@ Current primitives:
 - `buildMediaVadReport(...)`
 - `buildMediaInterruptionReport(...)`
 - `buildMediaQualityReport(...)`
+- `buildMediaWebRTCStatsReport(...)`
 
 Current proof consumption:
 
-- `@absolutejs/voice@0.0.22-beta.316` consumes `@absolutejs/media@0.0.1-beta.2`.
+- `@absolutejs/voice@0.0.22-beta.318` consumes `@absolutejs/media@0.0.1-beta.3`.
 - `absolutejs-voice-example` imports media primitives directly from `@absolutejs/media`.
-- Latest voice proof pack passed at `.voice-runtime/proof-pack/2026-04-30T08-16-14.357Z` with 5 frames, 3 processor nodes, 5 processor output frames, 1 processor-dropped frame, connected transport, 0 backpressure events, and media quality status `pass` with 12ms jitter, 1.0 speech ratio, 520ms gap/drift within the demo budget, and no quality issues.
+- Latest voice proof pack passed at `.voice-runtime/proof-pack/2026-04-30T08-42-46.753Z` with media quality status `pass` and browser WebRTC stats status `pass`: 1 active candidate pair, 1 live audio track, 0.001 packet-loss ratio, 80ms RTT, 8ms jitter, 240000 bytes received, and 210000 bytes sent.
 
 ## Competitor Target: Pipecat Media Depth
 
@@ -80,7 +81,7 @@ Research sources:
 
 Why this matters: a connected pipeline is not enough. Pipecat/WebRTC-style buyers care whether media is healthy under real timing, jitter, loss, drift, silence, and interruption conditions.
 
-Status: shipped in `@absolutejs/media@0.0.1-beta.2`; voice consumes it in `@absolutejs/voice@0.0.22-beta.316`. Remaining work under this priority is deeper WebRTC loss/RTT stats and per-stream continuity detail, which belongs with Priority 3.
+Status: shipped in `@absolutejs/media@0.0.1-beta.2`; voice consumes the quality report and the newer WebRTC stats report through `@absolutejs/media@0.0.1-beta.3`. Remaining work under this priority is per-stream continuity detail, which belongs with Priority 3.
 
 Deliverables:
 
@@ -124,6 +125,8 @@ Acceptance criteria:
 ## Priority 3: WebRTC Helpers
 
 Why this matters: Pipecat docs correctly position WebRTC as the better browser/mobile realtime transport for latency, packet loss, audio processing, stats, timestamping, and reconnection.
+
+Status: first browser-stats normalization shipped in `@absolutejs/media@0.0.1-beta.3` via `buildMediaWebRTCStatsReport(...)`; voice consumes it in `@absolutejs/voice@0.0.22-beta.318` as the `Browser media transport` readiness gate. Remaining work is real browser collection helpers, per-stream continuity, and richer inbound/outbound timing reports.
 
 Deliverables:
 

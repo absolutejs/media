@@ -303,6 +303,43 @@ export type MediaQualityReport = {
 	unknownSpeechFrames: number;
 };
 
+export type MediaWebRTCStatsSample = {
+	id?: string;
+	kind?: string;
+	[key: string]: unknown;
+	timestamp?: number;
+	type?: string;
+};
+
+export type MediaWebRTCStatsInput = {
+	maxJitterMs?: number;
+	maxPacketLossRatio?: number;
+	maxRoundTripTimeMs?: number;
+	requireConnectedCandidatePair?: boolean;
+	requireLiveAudioTrack?: boolean;
+	stats?: readonly MediaWebRTCStatsSample[];
+};
+
+export type MediaWebRTCStatsReport = {
+	activeCandidatePairs: number;
+	audioLevelAverage?: number;
+	bytesReceived: number;
+	bytesSent: number;
+	checkedAt: number;
+	endedAudioTracks: number;
+	inboundPackets: number;
+	issues: MediaPipelineCalibrationIssue[];
+	jitterBufferDelayMs?: number;
+	jitterMs?: number;
+	liveAudioTracks: number;
+	outboundPackets: number;
+	packetLossRatio: number;
+	packetsLost: number;
+	roundTripTimeMs?: number;
+	status: MediaPipelineStatus;
+	totalStats: number;
+};
+
 const formatLabel = (format: AudioFormat) =>
 	`${format.container}/${format.encoding}/${String(format.sampleRateHz)}hz/${String(format.channels)}ch`;
 
@@ -341,6 +378,33 @@ const max = (values: readonly number[]): number | undefined =>
 
 const min = (values: readonly number[]): number | undefined =>
 	values.length === 0 ? undefined : Math.min(...values);
+
+const numericStat = (
+	stat: MediaWebRTCStatsSample,
+	key: string
+): number | undefined => {
+	const value = stat[key];
+	return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+};
+
+const booleanStat = (
+	stat: MediaWebRTCStatsSample,
+	key: string
+): boolean | undefined => {
+	const value = stat[key];
+	return typeof value === 'boolean' ? value : undefined;
+};
+
+const stringStat = (
+	stat: MediaWebRTCStatsSample,
+	key: string
+): string | undefined => {
+	const value = stat[key];
+	return typeof value === 'string' ? value : undefined;
+};
+
+const secondsToMs = (value: number | undefined): number | undefined =>
+	value === undefined ? undefined : value * 1000;
 
 export const createMediaFrame = (
 	frame: MediaFrame
@@ -943,6 +1007,175 @@ export const buildMediaQualityReport = (
 		timestampDriftMs,
 		totalFrames: frames.length,
 		unknownSpeechFrames
+	};
+};
+
+export const buildMediaWebRTCStatsReport = (
+	input: MediaWebRTCStatsInput = {}
+): MediaWebRTCStatsReport => {
+	const stats = input.stats ?? [];
+	const issues: MediaPipelineCalibrationIssue[] = [];
+	const inbound = stats.filter(
+		(stat) => stat.type === 'inbound-rtp' && stringStat(stat, 'kind') !== 'video'
+	);
+	const outbound = stats.filter(
+		(stat) => stat.type === 'outbound-rtp' && stringStat(stat, 'kind') !== 'video'
+	);
+	const candidatePairs = stats.filter((stat) => stat.type === 'candidate-pair');
+	const audioTracks = stats.filter(
+		(stat) =>
+			(stat.type === 'track' || stat.type === 'media-source') &&
+			stringStat(stat, 'kind') === 'audio'
+	);
+	const activeCandidatePairs = candidatePairs.filter(
+		(stat) =>
+			booleanStat(stat, 'selected') === true ||
+			booleanStat(stat, 'nominated') === true ||
+			stringStat(stat, 'state') === 'succeeded'
+	).length;
+	const liveAudioTracks = audioTracks.filter(
+		(stat) =>
+			stringStat(stat, 'readyState') !== 'ended' &&
+			stringStat(stat, 'trackState') !== 'ended' &&
+			booleanStat(stat, 'ended') !== true
+	).length;
+	const endedAudioTracks = audioTracks.filter(
+		(stat) =>
+			stringStat(stat, 'readyState') === 'ended' ||
+			stringStat(stat, 'trackState') === 'ended' ||
+			booleanStat(stat, 'ended') === true
+	).length;
+	const inboundPackets = inbound.reduce(
+		(total, stat) => total + (numericStat(stat, 'packetsReceived') ?? 0),
+		0
+	);
+	const outboundPackets = outbound.reduce(
+		(total, stat) => total + (numericStat(stat, 'packetsSent') ?? 0),
+		0
+	);
+	const packetsLost = [...inbound, ...outbound].reduce(
+		(total, stat) => total + Math.max(0, numericStat(stat, 'packetsLost') ?? 0),
+		0
+	);
+	const packetLossDenominator = inboundPackets + packetsLost;
+	const packetLossRatio =
+		packetLossDenominator === 0 ? 0 : packetsLost / packetLossDenominator;
+	const bytesReceived = inbound.reduce(
+		(total, stat) => total + (numericStat(stat, 'bytesReceived') ?? 0),
+		0
+	);
+	const bytesSent = outbound.reduce(
+		(total, stat) => total + (numericStat(stat, 'bytesSent') ?? 0),
+		0
+	);
+	const roundTripTimeMs = max(
+		candidatePairs
+			.map((stat) =>
+				secondsToMs(
+					numericStat(stat, 'currentRoundTripTime') ??
+						numericStat(stat, 'roundTripTime')
+				)
+			)
+			.filter((value): value is number => value !== undefined)
+	);
+	const jitterMs = max(
+		[...inbound, ...outbound]
+			.map((stat) => secondsToMs(numericStat(stat, 'jitter')))
+			.filter((value): value is number => value !== undefined)
+	);
+	const jitterBufferDelayMs = max(
+		inbound
+			.map((stat) => {
+				const delay = numericStat(stat, 'jitterBufferDelay');
+				const emitted = numericStat(stat, 'jitterBufferEmittedCount');
+				return delay !== undefined && emitted !== undefined && emitted > 0
+					? (delay / emitted) * 1000
+					: undefined;
+			})
+			.filter((value): value is number => value !== undefined)
+	);
+	const audioLevels = audioTracks
+		.map((stat) => numericStat(stat, 'audioLevel'))
+		.filter((value): value is number => value !== undefined);
+
+	if (
+		input.requireConnectedCandidatePair &&
+		candidatePairs.length > 0 &&
+		activeCandidatePairs === 0
+	) {
+		pushIssue(
+			issues,
+			'error',
+			'media.webrtc_candidate_pair_missing',
+			'No active WebRTC candidate pair was observed.'
+		);
+	}
+	if (input.requireLiveAudioTrack && liveAudioTracks === 0) {
+		pushIssue(
+			issues,
+			'error',
+			'media.webrtc_audio_track_missing',
+			'No live WebRTC audio track was observed.'
+		);
+	}
+	if (
+		input.maxPacketLossRatio !== undefined &&
+		packetLossRatio > input.maxPacketLossRatio
+	) {
+		pushIssue(
+			issues,
+			'warning',
+			'media.webrtc_packet_loss',
+			`Observed WebRTC packet loss ratio ${String(packetLossRatio)} above ${String(input.maxPacketLossRatio)}.`
+		);
+	}
+	if (
+		input.maxRoundTripTimeMs !== undefined &&
+		roundTripTimeMs !== undefined &&
+		roundTripTimeMs > input.maxRoundTripTimeMs
+	) {
+		pushIssue(
+			issues,
+			'warning',
+			'media.webrtc_round_trip_time',
+			`Observed WebRTC RTT ${String(roundTripTimeMs)}ms above ${String(input.maxRoundTripTimeMs)}ms.`
+		);
+	}
+	if (
+		input.maxJitterMs !== undefined &&
+		jitterMs !== undefined &&
+		jitterMs > input.maxJitterMs
+	) {
+		pushIssue(
+			issues,
+			'warning',
+			'media.webrtc_jitter',
+			`Observed WebRTC jitter ${String(jitterMs)}ms above ${String(input.maxJitterMs)}ms.`
+		);
+	}
+
+	return {
+		activeCandidatePairs,
+		audioLevelAverage: average(audioLevels),
+		bytesReceived,
+		bytesSent,
+		checkedAt: Date.now(),
+		endedAudioTracks,
+		inboundPackets,
+		issues,
+		jitterBufferDelayMs,
+		jitterMs,
+		liveAudioTracks,
+		outboundPackets,
+		packetLossRatio,
+		packetsLost,
+		roundTripTimeMs,
+		status: issues.some((issue) => issue.severity === 'error')
+			? 'fail'
+			: issues.length > 0
+				? 'warn'
+				: 'pass',
+		totalStats: stats.length
 	};
 };
 
