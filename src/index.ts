@@ -270,6 +270,39 @@ export type MediaInterruptionReport = {
 	status: MediaPipelineStatus;
 };
 
+export type MediaQualityInput = {
+	frames?: readonly MediaFrame[];
+	maxBackpressureEvents?: number;
+	maxGapMs?: number;
+	maxJitterMs?: number;
+	maxTimestampDriftMs?: number;
+	minSpeechRatio?: number;
+	transport?: MediaTransportReport;
+};
+
+export type MediaQualityReport = {
+	assistantAudioFrames: number;
+	backpressureEvents: number;
+	checkedAt: number;
+	durationMs?: number;
+	gapCount: number;
+	gapsMs: number[];
+	inputAudioFrames: number;
+	issues: MediaPipelineCalibrationIssue[];
+	jitterMs?: number;
+	levelAverage?: number;
+	levelMax?: number;
+	levelMin?: number;
+	silenceFrames: number;
+	silenceRatio: number;
+	speechFrames: number;
+	speechRatio: number;
+	status: MediaPipelineStatus;
+	timestampDriftMs?: number;
+	totalFrames: number;
+	unknownSpeechFrames: number;
+};
+
 const formatLabel = (format: AudioFormat) =>
 	`${format.container}/${format.encoding}/${String(format.sampleRateHz)}hz/${String(format.channels)}ch`;
 
@@ -295,6 +328,19 @@ const numericMetadata = (
 	const value = frame.metadata?.[key];
 	return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 };
+
+const average = (values: readonly number[]): number | undefined =>
+	values.length === 0
+		? undefined
+		: values.reduce((total, value) => total + value, 0) / values.length;
+
+const sorted = (values: readonly number[]) => [...values].sort((a, b) => a - b);
+
+const max = (values: readonly number[]): number | undefined =>
+	values.length === 0 ? undefined : Math.max(...values);
+
+const min = (values: readonly number[]): number | undefined =>
+	values.length === 0 ? undefined : Math.min(...values);
 
 export const createMediaFrame = (
 	frame: MediaFrame
@@ -737,6 +783,166 @@ export const buildMediaInterruptionReport = (
 			: issues.length > 0
 				? 'warn'
 				: 'pass'
+	};
+};
+
+export const buildMediaQualityReport = (
+	input: MediaQualityInput = {}
+): MediaQualityReport => {
+	const frames = [...(input.frames ?? [])].sort(
+		(a, b) => (a.at ?? 0) - (b.at ?? 0)
+	);
+	const audioFrames = frames.filter(
+		(frame) => frame.kind === 'input-audio' || frame.kind === 'assistant-audio'
+	);
+	const inputAudioFrames = frames.filter(
+		(frame) => frame.kind === 'input-audio'
+	);
+	const assistantAudioFrames = frames.filter(
+		(frame) => frame.kind === 'assistant-audio'
+	);
+	const issues: MediaPipelineCalibrationIssue[] = [];
+	const gapsMs: number[] = [];
+
+	for (const [index, frame] of audioFrames.entries()) {
+		const previous = audioFrames[index - 1];
+		if (
+			previous?.at === undefined ||
+			frame.at === undefined ||
+			previous.durationMs === undefined
+		) {
+			continue;
+		}
+		const gap = frame.at - (previous.at + previous.durationMs);
+		if (gap > 0) {
+			gapsMs.push(gap);
+		}
+	}
+
+	const jitterMs =
+		audioFrames
+			.map((frame) => numericMetadata(frame, 'jitterMs'))
+			.filter((value): value is number => value !== undefined)
+			.at(-1) ?? max(gapsMs);
+	const first = audioFrames.find((frame) => frame.at !== undefined);
+	const last = audioFrames
+		.toReversed()
+		.find((frame) => frame.at !== undefined);
+	const durationMs =
+		first?.at !== undefined && last?.at !== undefined
+			? last.at - first.at + (last.durationMs ?? 0)
+			: undefined;
+	const expectedDurationMs =
+		audioFrames.length > 0
+			? audioFrames.reduce((total, frame) => total + (frame.durationMs ?? 0), 0)
+			: undefined;
+	const timestampDriftMs =
+		durationMs !== undefined && expectedDurationMs !== undefined
+			? Math.max(0, durationMs - expectedDurationMs)
+			: undefined;
+	const speechScores = inputAudioFrames.map(speechProbability);
+	const speechFrames = speechScores.filter((score) => score >= 0.6).length;
+	const silenceFrames = speechScores.filter((score) => score <= 0.35).length;
+	const unknownSpeechFrames = Math.max(
+		0,
+		inputAudioFrames.length - speechFrames - silenceFrames
+	);
+	const speechRatio =
+		inputAudioFrames.length === 0 ? 0 : speechFrames / inputAudioFrames.length;
+	const silenceRatio =
+		inputAudioFrames.length === 0 ? 0 : silenceFrames / inputAudioFrames.length;
+	const levels = audioFrames
+		.map(
+			(frame) =>
+				numericMetadata(frame, 'level') ??
+				numericMetadata(frame, 'rms') ??
+				numericMetadata(frame, 'energy')
+		)
+		.filter((value): value is number => value !== undefined);
+	const backpressureEvents = input.transport?.backpressureEvents ?? 0;
+
+	const maxGapMs = input.maxGapMs;
+	if (maxGapMs !== undefined && gapsMs.some((gap) => gap > maxGapMs)) {
+		pushIssue(
+			issues,
+			'warning',
+			'media.quality_gap',
+			`Observed media gap above ${String(maxGapMs)}ms.`
+		);
+	}
+	if (
+		input.maxJitterMs !== undefined &&
+		jitterMs !== undefined &&
+		jitterMs > input.maxJitterMs
+	) {
+		pushIssue(
+			issues,
+			'warning',
+			'media.quality_jitter',
+			`Observed jitter ${String(jitterMs)}ms above ${String(input.maxJitterMs)}ms.`
+		);
+	}
+	if (
+		input.maxTimestampDriftMs !== undefined &&
+		timestampDriftMs !== undefined &&
+		timestampDriftMs > input.maxTimestampDriftMs
+	) {
+		pushIssue(
+			issues,
+			'warning',
+			'media.quality_timestamp_drift',
+			`Observed timestamp drift ${String(timestampDriftMs)}ms above ${String(input.maxTimestampDriftMs)}ms.`
+		);
+	}
+	if (
+		input.minSpeechRatio !== undefined &&
+		inputAudioFrames.length > 0 &&
+		speechRatio < input.minSpeechRatio
+	) {
+		pushIssue(
+			issues,
+			'warning',
+			'media.quality_speech_ratio',
+			`Observed speech ratio ${String(speechRatio)} below ${String(input.minSpeechRatio)}.`
+		);
+	}
+	if (
+		input.maxBackpressureEvents !== undefined &&
+		backpressureEvents > input.maxBackpressureEvents
+	) {
+		pushIssue(
+			issues,
+			'warning',
+			'media.quality_backpressure',
+			`Observed ${String(backpressureEvents)} backpressure event(s), above ${String(input.maxBackpressureEvents)}.`
+		);
+	}
+
+	return {
+		assistantAudioFrames: assistantAudioFrames.length,
+		backpressureEvents,
+		checkedAt: Date.now(),
+		durationMs,
+		gapCount: gapsMs.length,
+		gapsMs,
+		inputAudioFrames: inputAudioFrames.length,
+		issues,
+		jitterMs,
+		levelAverage: average(levels),
+		levelMax: max(levels),
+		levelMin: min(levels),
+		silenceFrames,
+		silenceRatio,
+		speechFrames,
+		speechRatio,
+		status: issues.some((issue) => issue.severity === 'error')
+			? 'fail'
+			: issues.length > 0
+				? 'warn'
+				: 'pass',
+		timestampDriftMs,
+		totalFrames: frames.length,
+		unknownSpeechFrames
 	};
 };
 

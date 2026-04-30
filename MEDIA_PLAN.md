@@ -35,7 +35,7 @@ Future package splits are only justified if the surface becomes independently us
 
 ## Current Surface
 
-Published package: `@absolutejs/media@0.0.1-beta.1`
+Published package: `@absolutejs/media@0.0.1-beta.2`
 
 Current primitives:
 
@@ -50,12 +50,13 @@ Current primitives:
 - `buildMediaResamplingPlan(...)`
 - `buildMediaVadReport(...)`
 - `buildMediaInterruptionReport(...)`
+- `buildMediaQualityReport(...)`
 
 Current proof consumption:
 
-- `@absolutejs/voice@0.0.22-beta.314` consumes `@absolutejs/media@0.0.1-beta.1`.
+- `@absolutejs/voice@0.0.22-beta.316` consumes `@absolutejs/media@0.0.1-beta.2`.
 - `absolutejs-voice-example` imports media primitives directly from `@absolutejs/media`.
-- Latest voice proof pack passed at `.voice-runtime/proof-pack/2026-04-30T07-54-06.747Z` with 5 frames, 3 processor nodes, 5 processor output frames, 1 processor-dropped frame, connected transport, and 0 backpressure events.
+- Latest voice proof pack passed at `.voice-runtime/proof-pack/2026-04-30T08-16-14.357Z` with 5 frames, 3 processor nodes, 5 processor output frames, 1 processor-dropped frame, connected transport, 0 backpressure events, and media quality status `pass` with 12ms jitter, 1.0 speech ratio, 520ms gap/drift within the demo budget, and no quality issues.
 
 ## Competitor Target: Pipecat Media Depth
 
@@ -79,6 +80,8 @@ Research sources:
 
 Why this matters: a connected pipeline is not enough. Pipecat/WebRTC-style buyers care whether media is healthy under real timing, jitter, loss, drift, silence, and interruption conditions.
 
+Status: shipped in `@absolutejs/media@0.0.1-beta.2`; voice consumes it in `@absolutejs/voice@0.0.22-beta.316`. Remaining work under this priority is deeper WebRTC loss/RTT stats and per-stream continuity detail, which belongs with Priority 3.
+
 Deliverables:
 
 - `buildMediaQualityReport(...)` for frames and optional transport events.
@@ -92,7 +95,7 @@ Deliverables:
 - interruption stop latency inputs where available
 - media level metadata summaries from RMS/energy/level fields
 - Stable status/issue codes for quality gates.
-- Voice consumption: `@absolutejs/voice` should include quality report data in `/voice/media-pipeline`, Markdown/HTML, proof-pack assertions, readiness gates, and operations-record links.
+- Voice consumption: `@absolutejs/voice` includes quality report data in `/voice/media-pipeline`, Markdown/HTML, and proof-pack assertions. Readiness-gate and operations-record rollups remain the next voice integration step.
 
 Acceptance criteria:
 
