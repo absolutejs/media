@@ -85,6 +85,7 @@ export type MediaProcessorGraphState =
 	| 'running';
 
 export type MediaProcessorGraphLifecycleEventKind =
+	| 'backpressure'
 	| 'close'
 	| 'drain'
 	| 'error'
@@ -125,6 +126,38 @@ export type MediaProcessorEdgeReport = {
 	outputFrames: readonly string[];
 	status: MediaPipelineStatus;
 	to: string;
+};
+
+export type MediaProcessorBackpressureStrategy = 'drop' | 'queue' | 'reject';
+
+export type MediaProcessorBackpressureEventKind =
+	| 'complete'
+	| 'drop'
+	| 'queue'
+	| 'reject'
+	| 'start';
+
+export type MediaProcessorBackpressureEvent = {
+	at: number;
+	frameId: string;
+	inFlight: number;
+	kind: MediaProcessorBackpressureEventKind;
+	maxInFlightFrames: number;
+	maxQueuedFrames: number;
+	queued: number;
+};
+
+export type MediaProcessorBackpressureReport = {
+	completedFrames: number;
+	droppedFrames: number;
+	events: readonly MediaProcessorBackpressureEvent[];
+	maxInFlightFrames: number;
+	maxObservedInFlight: number;
+	maxObservedQueued: number;
+	maxQueuedFrames: number;
+	queuedFrames: number;
+	rejectedFrames: number;
+	status: MediaPipelineStatus;
 };
 
 export type MediaProcessorBranchMode = 'all' | 'first';
@@ -186,6 +219,8 @@ export type MediaProcessorNodeReport = {
 };
 
 export type MediaProcessorGraphReport = {
+	backpressure: MediaProcessorBackpressureReport;
+	backpressureEvents: readonly MediaProcessorBackpressureEvent[];
 	checkedAt: number;
 	droppedFrames: number;
 	edges: readonly MediaProcessorEdgeReport[];
@@ -1365,6 +1400,43 @@ const buildMediaProcessorEdgeReports = (
 	});
 };
 
+const buildMediaProcessorBackpressureReport = (input: {
+	events?: readonly MediaProcessorBackpressureEvent[];
+	maxInFlightFrames?: number;
+	maxQueuedFrames?: number;
+}): MediaProcessorBackpressureReport => {
+	const events = input.events ?? [];
+	const completedFrames = events.filter(
+		(event) => event.kind === 'complete'
+	).length;
+	const droppedFrames = events.filter((event) => event.kind === 'drop').length;
+	const queuedFrames = events.filter((event) => event.kind === 'queue').length;
+	const rejectedFrames = events.filter(
+		(event) => event.kind === 'reject'
+	).length;
+	const maxObservedInFlight = events.reduce(
+		(max, event) => Math.max(max, event.inFlight),
+		0
+	);
+	const maxObservedQueued = events.reduce(
+		(max, event) => Math.max(max, event.queued),
+		0
+	);
+
+	return {
+		completedFrames,
+		droppedFrames,
+		events,
+		maxInFlightFrames: input.maxInFlightFrames ?? Number.POSITIVE_INFINITY,
+		maxObservedInFlight,
+		maxObservedQueued,
+		maxQueuedFrames: input.maxQueuedFrames ?? Number.POSITIVE_INFINITY,
+		queuedFrames,
+		rejectedFrames,
+		status: droppedFrames > 0 || rejectedFrames > 0 ? 'warn' : 'pass'
+	};
+};
+
 export const buildMediaProcessorBranchReports = (input: {
 	node: string;
 	report: Pick<MediaProcessorGraphReport, 'edgeEvents'>;
@@ -1442,13 +1514,22 @@ export const buildMediaProcessorFanInReport = (input: {
 };
 
 export const buildMediaProcessorGraphReport = (input: {
+	backpressureEvents?: readonly MediaProcessorBackpressureEvent[];
 	edgeEvents?: readonly MediaProcessorEdgeEvent[];
 	events?: readonly MediaProcessorNodeEvent[];
 	lifecycleEvents?: readonly MediaProcessorGraphLifecycleEvent[];
+	maxInFlightFrames?: number;
+	maxQueuedFrames?: number;
 	name: string;
 	nodes: readonly MediaProcessorNode[];
 	state?: MediaProcessorGraphState;
 }): MediaProcessorGraphReport => {
+	const backpressureEvents = input.backpressureEvents ?? [];
+	const backpressure = buildMediaProcessorBackpressureReport({
+		events: backpressureEvents,
+		maxInFlightFrames: input.maxInFlightFrames,
+		maxQueuedFrames: input.maxQueuedFrames
+	});
 	const events = input.events ?? [];
 	const edgeEvents = input.edgeEvents ?? [];
 	const edges = buildMediaProcessorEdgeReports(edgeEvents);
@@ -1505,11 +1586,15 @@ export const buildMediaProcessorGraphReport = (input: {
 	const graphStatus =
 		state === 'failed' || graphErrors.length > 0
 			? 'fail'
-			: status === 'warn' || edges.some((edge) => edge.status === 'warn')
+			: status === 'warn' ||
+				  backpressure.status === 'warn' ||
+				  edges.some((edge) => edge.status === 'warn')
 				? 'warn'
 				: 'pass';
 
 	return {
+		backpressure,
+		backpressureEvents,
 		checkedAt: Date.now(),
 		droppedFrames,
 		edges,
@@ -1762,13 +1847,33 @@ export const createMediaProcessorFanIn = (input: {
 };
 
 export const createMediaProcessorGraph = (input: {
+	backpressureStrategy?: MediaProcessorBackpressureStrategy;
+	maxInFlightFrames?: number;
+	maxQueuedFrames?: number;
 	name?: string;
 	nodes?: readonly MediaProcessorNode[];
+	queueOverflowStrategy?: Extract<
+		MediaProcessorBackpressureStrategy,
+		'drop' | 'reject'
+	>;
 } = {}): MediaProcessorGraph => {
 	const nodes = input.nodes ?? [];
+	const backpressureEvents: MediaProcessorBackpressureEvent[] = [];
 	const events: MediaProcessorNodeEvent[] = [];
 	const edgeEvents: MediaProcessorEdgeEvent[] = [];
 	const lifecycleEvents: MediaProcessorGraphLifecycleEvent[] = [];
+	const maxInFlightFrames =
+		input.maxInFlightFrames ?? Number.POSITIVE_INFINITY;
+	const maxQueuedFrames = input.maxQueuedFrames ?? Number.POSITIVE_INFINITY;
+	const backpressureStrategy = input.backpressureStrategy ?? 'queue';
+	const queueOverflowStrategy = input.queueOverflowStrategy ?? 'drop';
+	const queuedTasks: Array<{
+		frame: MediaFrame;
+		resolve: (frames: readonly MediaFrame[]) => void;
+		reject: (error: unknown) => void;
+	}> = [];
+	let hasStarted = false;
+	let inFlightFrames = 0;
 	let state: MediaProcessorGraphState = 'idle';
 
 	const pushLifecycleEvent = (
@@ -1795,7 +1900,32 @@ export const createMediaProcessorGraph = (input: {
 		pushLifecycleEvent({ ...event, kind, state: nextState });
 	};
 
-	const process = async (frame: MediaFrame) => {
+	const pushBackpressureEvent = (
+		kind: MediaProcessorBackpressureEventKind,
+		frame: MediaFrame
+	) => {
+		const event: MediaProcessorBackpressureEvent = {
+			at: Date.now(),
+			frameId: frame.id,
+			inFlight: inFlightFrames,
+			kind,
+			maxInFlightFrames,
+			maxQueuedFrames,
+			queued: queuedTasks.length
+		};
+		backpressureEvents.push(event);
+		pushLifecycleEvent({
+			dropped: kind === 'drop' ? 1 : 0,
+			error:
+				kind === 'reject'
+					? 'Media processor graph rejected a frame due to backpressure.'
+					: undefined,
+			frameId: frame.id,
+			kind: 'backpressure'
+		});
+	};
+
+	const processNow = async (frame: MediaFrame) => {
 		if (state === 'closed') {
 			pushLifecycleEvent({
 				error: 'Cannot process frames after the media processor graph is closed.',
@@ -1817,7 +1947,8 @@ export const createMediaProcessorGraph = (input: {
 			);
 		}
 
-		if (lifecycleEvents.length === 0) {
+		if (!hasStarted) {
+			hasStarted = true;
 			setState('running', 'start', { frameId: frame.id, inputs: 1 });
 		} else if (state === 'idle') {
 			setState('running', 'process', { frameId: frame.id, inputs: 1 });
@@ -1906,8 +2037,70 @@ export const createMediaProcessorGraph = (input: {
 		return frames;
 	};
 
+	const runQueuedTasks = () => {
+		while (inFlightFrames < maxInFlightFrames && queuedTasks.length > 0) {
+			const task = queuedTasks.shift();
+			if (task === undefined) {
+				return;
+			}
+			void runProcessTask(task.frame).then(task.resolve, task.reject);
+		}
+	};
+
+	const runProcessTask = async (frame: MediaFrame) => {
+		inFlightFrames += 1;
+		pushBackpressureEvent('start', frame);
+		try {
+			return await processNow(frame);
+		} finally {
+			inFlightFrames -= 1;
+			pushBackpressureEvent('complete', frame);
+			runQueuedTasks();
+		}
+	};
+
+	const process = async (frame: MediaFrame) => {
+		if (inFlightFrames < maxInFlightFrames) {
+			return runProcessTask(frame);
+		}
+
+		if (backpressureStrategy === 'drop') {
+			pushBackpressureEvent('drop', frame);
+			return [];
+		}
+		if (backpressureStrategy === 'reject') {
+			pushBackpressureEvent('reject', frame);
+			throw new Error(
+				'Media processor graph rejected a frame due to backpressure.'
+			);
+		}
+		if (queuedTasks.length >= maxQueuedFrames) {
+			if (queueOverflowStrategy === 'reject') {
+				pushBackpressureEvent('reject', frame);
+				throw new Error(
+					'Media processor graph queue is full.'
+				);
+			}
+			pushBackpressureEvent('drop', frame);
+			return [];
+		}
+
+		pushBackpressureEvent('queue', frame);
+		return new Promise<readonly MediaFrame[]>((resolve, reject) => {
+			queuedTasks.push({ frame, reject, resolve });
+		});
+	};
+
 	return {
 		close: async () => {
+			while (queuedTasks.length > 0) {
+				const task = queuedTasks.shift();
+				task?.reject(
+					new Error(
+						'Media processor graph closed before a queued frame could process.'
+					)
+				);
+			}
 			setState('closed', 'close');
 		},
 		drain: async () => {
@@ -1954,9 +2147,12 @@ export const createMediaProcessorGraph = (input: {
 		},
 		report: () =>
 			buildMediaProcessorGraphReport({
+				backpressureEvents,
 				edgeEvents,
 				events,
 				lifecycleEvents,
+				maxInFlightFrames,
+				maxQueuedFrames,
 				name: input.name ?? 'media-processor-graph',
 				nodes,
 				state

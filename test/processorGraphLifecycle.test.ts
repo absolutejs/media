@@ -287,6 +287,65 @@ describe('processor graph lifecycle', () => {
 		expect(output[0]?.metadata?.mediaFanInMissingBranches).toEqual(['record']);
 	});
 
+	test('queues and drops frames when graph backpressure limits are exceeded', async () => {
+		let releaseFirstFrame: (() => void) | undefined;
+		const graph = createMediaProcessorGraph({
+			backpressureStrategy: 'queue',
+			maxInFlightFrames: 1,
+			maxQueuedFrames: 1,
+			name: 'backpressure-test',
+			nodes: [
+				{
+					name: 'slow',
+					process: async (frame) => {
+						if (frame.id === 'frame-1') {
+							await new Promise<void>((resolve) => {
+								releaseFirstFrame = resolve;
+							});
+						}
+						return frame;
+					}
+				}
+			]
+		});
+
+		const first = graph.process(
+			createMediaFrame({
+				id: 'frame-1',
+				kind: 'input-audio',
+				source: 'browser'
+			})
+		);
+		const second = graph.process(
+			createMediaFrame({
+				id: 'frame-2',
+				kind: 'input-audio',
+				source: 'browser'
+			})
+		);
+		const third = await graph.process(
+			createMediaFrame({
+				id: 'frame-3',
+				kind: 'input-audio',
+				source: 'browser'
+			})
+		);
+
+		expect(third).toEqual([]);
+		expect(graph.report().backpressure.queuedFrames).toBe(1);
+		expect(graph.report().backpressure.droppedFrames).toBe(1);
+
+		releaseFirstFrame?.();
+		expect((await first).map((frame) => frame.id)).toEqual(['frame-1']);
+		expect((await second).map((frame) => frame.id)).toEqual(['frame-2']);
+
+		const report = graph.report();
+		expect(report.backpressure.status).toBe('warn');
+		expect(report.backpressure.maxObservedInFlight).toBe(1);
+		expect(report.backpressure.maxObservedQueued).toBe(1);
+		expect(report.status).toBe('warn');
+	});
+
 	test('marks graph and node failures when a processor throws', async () => {
 		const graph = createMediaProcessorGraph({
 			nodes: [
