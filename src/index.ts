@@ -104,6 +104,28 @@ export type MediaProcessorGraphLifecycleEvent = {
 	state: MediaProcessorGraphState;
 };
 
+export type MediaProcessorEdgeEvent = {
+	at: number;
+	dropped: number;
+	emitted: number;
+	frameId: string;
+	from: string;
+	label?: string;
+	outputFrameIds: readonly string[];
+	to: string;
+};
+
+export type MediaProcessorEdgeReport = {
+	droppedFrames: number;
+	emittedFrames: number;
+	events: readonly MediaProcessorEdgeEvent[];
+	from: string;
+	label?: string;
+	outputFrames: readonly string[];
+	status: MediaPipelineStatus;
+	to: string;
+};
+
 export type MediaProcessorNodeReport = {
 	droppedFrames: number;
 	emittedFrames: number;
@@ -118,8 +140,10 @@ export type MediaProcessorNodeReport = {
 export type MediaProcessorGraphReport = {
 	checkedAt: number;
 	droppedFrames: number;
+	edges: readonly MediaProcessorEdgeReport[];
 	emittedFrames: number;
 	errors: readonly MediaProcessorGraphLifecycleEvent[];
+	edgeEvents: readonly MediaProcessorEdgeEvent[];
 	events: readonly MediaProcessorNodeEvent[];
 	inputFrames: number;
 	lifecycleEvents: readonly MediaProcessorGraphLifecycleEvent[];
@@ -134,6 +158,12 @@ export type MediaProcessorNode = {
 	kind?: MediaProcessorNodeKind;
 	name: string;
 	outputFormat?: AudioFormat;
+	edgeLabel?:
+		| string
+		| ((
+				input: MediaFrame,
+				output: readonly MediaFrame[]
+		  ) => string | undefined);
 	process: (
 		frame: MediaFrame
 	) =>
@@ -154,6 +184,7 @@ export type MediaProcessorNode = {
 export type MediaProcessorGraph = {
 	close: () => Promise<void>;
 	drain: () => Promise<readonly MediaFrame[]>;
+	edgeEvents: () => readonly MediaProcessorEdgeEvent[];
 	events: () => readonly MediaProcessorGraphLifecycleEvent[];
 	nodes: readonly MediaProcessorNode[];
 	process: (
@@ -1226,7 +1257,61 @@ const normalizeProcessorFlushResult = (
 	return [result as MediaFrame];
 };
 
+const getProcessorEdgeLabel = (
+	node: MediaProcessorNode,
+	input: MediaFrame,
+	output: readonly MediaFrame[]
+): string | undefined => {
+	if (typeof node.edgeLabel === 'function') {
+		return node.edgeLabel(input, output);
+	}
+	return node.edgeLabel;
+};
+
+const buildMediaProcessorEdgeReports = (
+	edgeEvents: readonly MediaProcessorEdgeEvent[]
+): readonly MediaProcessorEdgeReport[] => {
+	const edgeKeys = new Map<string, MediaProcessorEdgeEvent[]>();
+
+	for (const event of edgeEvents) {
+		const key = `${event.from}\u0000${event.to}\u0000${event.label ?? ''}`;
+		const events = edgeKeys.get(key);
+		if (events === undefined) {
+			edgeKeys.set(key, [event]);
+		} else {
+			events.push(event);
+		}
+	}
+
+	return Array.from(edgeKeys.values()).map((events) => {
+		const first = events[0] as MediaProcessorEdgeEvent;
+		const droppedFrames = events.reduce(
+			(total, event) => total + event.dropped,
+			0
+		);
+		const emittedFrames = events.reduce(
+			(total, event) => total + event.emitted,
+			0
+		);
+		const outputFrames = Array.from(
+			new Set(events.flatMap((event) => event.outputFrameIds))
+		);
+
+		return {
+			droppedFrames,
+			emittedFrames,
+			events,
+			from: first.from,
+			label: first.label,
+			outputFrames,
+			status: droppedFrames > 0 && emittedFrames === 0 ? 'warn' : 'pass',
+			to: first.to
+		} satisfies MediaProcessorEdgeReport;
+	});
+};
+
 export const buildMediaProcessorGraphReport = (input: {
+	edgeEvents?: readonly MediaProcessorEdgeEvent[];
 	events?: readonly MediaProcessorNodeEvent[];
 	lifecycleEvents?: readonly MediaProcessorGraphLifecycleEvent[];
 	name: string;
@@ -1234,6 +1319,8 @@ export const buildMediaProcessorGraphReport = (input: {
 	state?: MediaProcessorGraphState;
 }): MediaProcessorGraphReport => {
 	const events = input.events ?? [];
+	const edgeEvents = input.edgeEvents ?? [];
+	const edges = buildMediaProcessorEdgeReports(edgeEvents);
 	const lifecycleEvents = input.lifecycleEvents ?? [];
 	const graphErrors = lifecycleEvents.filter(
 		(event) => event.kind === 'error' || event.kind === 'node-error'
@@ -1287,13 +1374,17 @@ export const buildMediaProcessorGraphReport = (input: {
 	const graphStatus =
 		state === 'failed' || graphErrors.length > 0
 			? 'fail'
-			: status;
+			: status === 'warn' || edges.some((edge) => edge.status === 'warn')
+				? 'warn'
+				: 'pass';
 
 	return {
 		checkedAt: Date.now(),
 		droppedFrames,
+		edges,
 		emittedFrames,
 		errors: graphErrors,
+		edgeEvents,
 		events,
 		inputFrames,
 		lifecycleEvents,
@@ -1310,6 +1401,7 @@ export const createMediaProcessorGraph = (input: {
 } = {}): MediaProcessorGraph => {
 	const nodes = input.nodes ?? [];
 	const events: MediaProcessorNodeEvent[] = [];
+	const edgeEvents: MediaProcessorEdgeEvent[] = [];
 	const lifecycleEvents: MediaProcessorGraphLifecycleEvent[] = [];
 	let state: MediaProcessorGraphState = 'idle';
 
@@ -1367,7 +1459,9 @@ export const createMediaProcessorGraph = (input: {
 
 		let frames: readonly MediaFrame[] = [frame];
 
-		for (const node of nodes) {
+		for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex += 1) {
+			const node = nodes[nodeIndex] as MediaProcessorNode;
+			const nextNode = nodes[nodeIndex + 1];
 			const nextFrames: MediaFrame[] = [];
 			for (const current of frames) {
 				let output: readonly MediaFrame[];
@@ -1392,6 +1486,16 @@ export const createMediaProcessorGraph = (input: {
 					frameId: current.id,
 					inputs: 1,
 					node: node.name
+				});
+				edgeEvents.push({
+					at: Date.now(),
+					dropped: output.length === 0 ? 1 : 0,
+					emitted: output.length,
+					frameId: current.id,
+					from: node.name,
+					label: getProcessorEdgeLabel(node, current, output),
+					outputFrameIds: output.map((frame) => frame.id),
+					to: nextNode?.name ?? 'output'
 				});
 				pushLifecycleEvent({
 					dropped: output.length === 0 ? 1 : 0,
@@ -1450,6 +1554,7 @@ export const createMediaProcessorGraph = (input: {
 			}
 			return flushedFrames;
 		},
+		edgeEvents: () => edgeEvents,
 		events: () => lifecycleEvents,
 		nodes,
 		process,
@@ -1462,6 +1567,7 @@ export const createMediaProcessorGraph = (input: {
 		},
 		report: () =>
 			buildMediaProcessorGraphReport({
+				edgeEvents,
 				events,
 				lifecycleEvents,
 				name: input.name ?? 'media-processor-graph',

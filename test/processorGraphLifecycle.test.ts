@@ -44,6 +44,75 @@ describe('processor graph lifecycle', () => {
 		);
 	});
 
+	test('reports graph edges, split outputs, labels, and terminal drops', async () => {
+		const graph = createMediaProcessorGraph({
+			name: 'edge-test',
+			nodes: [
+				{
+					edgeLabel: 'split',
+					name: 'splitter',
+					process: (frame) => [
+						{ ...frame, id: 'left-1' },
+						{ ...frame, id: 'right-1' }
+					]
+				},
+				{
+					edgeLabel: (frame) =>
+						frame.id.startsWith('left') ? 'keep' : 'drop',
+					name: 'gate',
+					process: (frame) =>
+						frame.id.startsWith('left') ? frame : undefined
+				}
+			]
+		});
+
+		expect(
+			await graph.process(
+				createMediaFrame({
+					id: 'input-1',
+					kind: 'input-audio',
+					source: 'browser'
+				})
+			)
+		).toEqual([
+			createMediaFrame({
+				id: 'left-1',
+				kind: 'input-audio',
+				source: 'browser'
+			})
+		]);
+
+		const report = graph.report();
+		expect(graph.edgeEvents()).toHaveLength(3);
+		expect(report.edges).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					emittedFrames: 2,
+					from: 'splitter',
+					label: 'split',
+					outputFrames: ['left-1', 'right-1'],
+					to: 'gate'
+				}),
+				expect.objectContaining({
+					droppedFrames: 1,
+					emittedFrames: 0,
+					from: 'gate',
+					label: 'drop',
+					status: 'warn',
+					to: 'output'
+				}),
+				expect.objectContaining({
+					emittedFrames: 1,
+					from: 'gate',
+					label: 'keep',
+					outputFrames: ['left-1'],
+					to: 'output'
+				})
+			])
+		);
+		expect(report.status).toBe('warn');
+	});
+
 	test('marks graph and node failures when a processor throws', async () => {
 		const graph = createMediaProcessorGraph({
 			nodes: [
