@@ -1,6 +1,6 @@
 {
 	"name": "@absolutejs/media",
-	"version": "0.0.1-beta.10",
+	"version": "0.0.1-beta.11",
 	"description": "Realtime media primitives for AbsoluteJS",
 	"repository": {
 		"type": "git",

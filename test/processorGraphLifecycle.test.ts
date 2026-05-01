@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import {
 	buildMediaProcessorBranchReports,
+	buildMediaProcessorFanInReport,
 	createMediaFrame,
 	createMediaProcessorBranchRouter,
+	createMediaProcessorFanIn,
 	createMediaProcessorGraph
 } from '../src';
 
@@ -183,6 +185,106 @@ describe('processor graph lifecycle', () => {
 				})
 			])
 		);
+	});
+
+	test('fans branch outputs back into a complete joined frame', async () => {
+		const graph = createMediaProcessorGraph({
+			name: 'fan-in-test',
+			nodes: [
+				createMediaProcessorBranchRouter({
+					name: 'router',
+					routes: [
+						{
+							name: 'transcribe',
+							process: (frame) => ({
+								...frame,
+								id: `${frame.id}-transcribe`
+							})
+						},
+						{
+							name: 'record',
+							process: (frame) => ({
+								...frame,
+								id: `${frame.id}-record`
+							})
+						}
+					]
+				}),
+				createMediaProcessorFanIn({
+					expectedBranches: ['transcribe', 'record'],
+					name: 'joiner'
+				})
+			]
+		});
+
+		const output = await graph.process(
+			createMediaFrame({
+				id: 'call-frame-1',
+				kind: 'input-audio',
+				source: 'telephony'
+			})
+		);
+
+		expect(output).toHaveLength(1);
+		expect(output[0]?.metadata?.mediaFanInStatus).toBe('complete');
+		expect(output[0]?.metadata?.frameIds).toEqual([
+			'call-frame-1-transcribe',
+			'call-frame-1-record'
+		]);
+
+		const report = buildMediaProcessorFanInReport({
+			node: 'joiner',
+			report: graph.report()
+		});
+		expect(report).toEqual(
+			expect.objectContaining({
+				completeGroups: 1,
+				emittedFrames: 1,
+				partialGroups: 0,
+				pendingGroups: 1,
+				status: 'pass'
+			})
+		);
+	});
+
+	test('flushes pending fan-in groups as partial output', async () => {
+		const graph = createMediaProcessorGraph({
+			name: 'fan-in-partial-test',
+			nodes: [
+				createMediaProcessorBranchRouter({
+					name: 'router',
+					routes: [
+						{
+							name: 'transcribe',
+							process: (frame) => ({
+								...frame,
+								id: `${frame.id}-transcribe`
+							}),
+							when: (frame) => frame.kind === 'input-audio'
+						}
+					]
+				}),
+				createMediaProcessorFanIn({
+					expectedBranches: ['transcribe', 'record'],
+					name: 'joiner'
+				})
+			]
+		});
+
+		expect(
+			await graph.process(
+				createMediaFrame({
+					id: 'call-frame-1',
+					kind: 'input-audio',
+					source: 'telephony'
+				})
+			)
+		).toEqual([]);
+
+		const output = await graph.drain();
+		expect(output).toHaveLength(1);
+		expect(output[0]?.metadata?.mediaFanInStatus).toBe('partial');
+		expect(output[0]?.metadata?.mediaFanInMissingBranches).toEqual(['record']);
 	});
 
 	test('marks graph and node failures when a processor throws', async () => {

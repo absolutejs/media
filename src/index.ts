@@ -146,6 +146,34 @@ export type MediaProcessorBranchReport = {
 	status: MediaPipelineStatus;
 };
 
+export type MediaProcessorFanInStatus = 'complete' | 'partial';
+
+export type MediaProcessorFanInJoinInput = {
+	branches: readonly string[];
+	frames: readonly MediaFrame[];
+	missingBranches: readonly string[];
+	sourceFrameId: string;
+	status: MediaProcessorFanInStatus;
+};
+
+export type MediaProcessorFanInJoin = (
+	input: MediaProcessorFanInJoinInput
+) =>
+	| MediaFrame
+	| readonly MediaFrame[]
+	| undefined
+	| Promise<MediaFrame | readonly MediaFrame[] | undefined>;
+
+export type MediaProcessorFanInReport = {
+	completeGroups: number;
+	emittedFrames: number;
+	missingBranches: readonly string[];
+	node: string;
+	partialGroups: number;
+	pendingGroups: number;
+	status: MediaPipelineStatus;
+};
+
 export type MediaProcessorNodeReport = {
 	droppedFrames: number;
 	emittedFrames: number;
@@ -1326,7 +1354,12 @@ const buildMediaProcessorEdgeReports = (
 			from: first.from,
 			label: first.label,
 			outputFrames,
-			status: droppedFrames > 0 && emittedFrames === 0 ? 'warn' : 'pass',
+			status:
+				first.label === 'pending'
+					? 'pass'
+					: droppedFrames > 0 && emittedFrames === 0
+						? 'warn'
+						: 'pass',
 			to: first.to
 		} satisfies MediaProcessorEdgeReport;
 	});
@@ -1374,6 +1407,38 @@ export const buildMediaProcessorBranchReports = (input: {
 			status: droppedFrames > 0 && emittedFrames === 0 ? 'warn' : 'pass'
 		} satisfies MediaProcessorBranchReport;
 	});
+};
+
+export const buildMediaProcessorFanInReport = (input: {
+	node: string;
+	report: Pick<MediaProcessorGraphReport, 'edgeEvents'>;
+}): MediaProcessorFanInReport => {
+	const events = input.report.edgeEvents.filter(
+		(event) => event.from === input.node
+	);
+	const completeGroups = events.filter(
+		(event) => event.label === 'complete'
+	).length;
+	const partialGroups = events.filter(
+		(event) => event.label === 'partial'
+	).length;
+	const pendingGroups = events.filter(
+		(event) => event.label === 'pending'
+	).length;
+	const emittedFrames = events.reduce(
+		(total, event) => total + event.emitted,
+		0
+	);
+
+	return {
+		completeGroups,
+		emittedFrames,
+		missingBranches: [],
+		node: input.node,
+		partialGroups,
+		pendingGroups,
+		status: partialGroups > 0 ? 'warn' : 'pass'
+	};
 };
 
 export const buildMediaProcessorGraphReport = (input: {
@@ -1532,6 +1597,165 @@ export const createMediaProcessorBranchRouter = (input: {
 						: routeOutput)
 				);
 			}
+			return output;
+		}
+	};
+};
+
+const getMediaProcessorFrameBranch = (frame: MediaFrame): string | undefined => {
+	const branch = frame.metadata?.mediaBranch ?? frame.metadata?.mediaBranchRoute;
+	return typeof branch === 'string' ? branch : undefined;
+};
+
+const getMediaProcessorFrameSourceId = (frame: MediaFrame): string => {
+	const sourceFrameId = frame.metadata?.mediaBranchSourceFrameId;
+	return typeof sourceFrameId === 'string' ? sourceFrameId : frame.id;
+};
+
+const createDefaultMediaProcessorFanInFrame = (
+	input: MediaProcessorFanInJoinInput
+): MediaFrame =>
+	createMediaFrame({
+		id: `${input.sourceFrameId}:fan-in:${input.status}`,
+		kind: 'metadata',
+		metadata: {
+			branches: input.branches,
+			frameIds: input.frames.map((frame) => frame.id),
+			missingBranches: input.missingBranches,
+			sourceFrameId: input.sourceFrameId,
+			status: input.status
+		},
+		source: 'voice-runtime'
+	});
+
+export const createMediaProcessorFanIn = (input: {
+	branch?: (frame: MediaFrame) => string | undefined;
+	dropUnbranchedFrames?: boolean;
+	emitPartialOnTimeout?: boolean;
+	expectedBranches: readonly string[];
+	flushPartial?: boolean;
+	join?: MediaProcessorFanInJoin;
+	name: string;
+	sourceFrameId?: (frame: MediaFrame) => string;
+	timeoutMs?: number;
+}): MediaProcessorNode => {
+	type PendingFanInGroup = {
+		branches: Map<string, MediaFrame[]>;
+		createdAt: number;
+		sourceFrameId: string;
+	};
+
+	const expectedBranches = Array.from(new Set(input.expectedBranches));
+	const pendingGroups = new Map<string, PendingFanInGroup>();
+	const join = input.join ?? createDefaultMediaProcessorFanInFrame;
+	const emitPartialOnTimeout = input.emitPartialOnTimeout ?? true;
+	const flushPartial = input.flushPartial ?? true;
+	const dropUnbranchedFrames = input.dropUnbranchedFrames ?? true;
+
+	const buildJoinInput = (
+		group: PendingFanInGroup,
+		status: MediaProcessorFanInStatus
+	): MediaProcessorFanInJoinInput => {
+		const frames = expectedBranches.flatMap(
+			(branch) => group.branches.get(branch) ?? []
+		);
+		const missingBranches = expectedBranches.filter(
+			(branch) => !group.branches.has(branch)
+		);
+		return {
+			branches: expectedBranches,
+			frames,
+			missingBranches,
+			sourceFrameId: group.sourceFrameId,
+			status
+		};
+	};
+
+	const emitGroup = async (
+		group: PendingFanInGroup,
+		status: MediaProcessorFanInStatus
+	): Promise<readonly MediaFrame[]> => {
+		const joinInput = buildJoinInput(group, status);
+		return normalizeProcessorFlushResult(await join(joinInput)).map((frame) => ({
+			...frame,
+			metadata: {
+				...frame.metadata,
+				mediaFanInBranches: joinInput.branches,
+				mediaFanInMissingBranches: joinInput.missingBranches,
+				mediaFanInSourceFrameId: joinInput.sourceFrameId,
+				mediaFanInStatus: status
+			}
+		}));
+	};
+
+	const emitTimedOutGroups = async (now: number): Promise<MediaFrame[]> => {
+		if (input.timeoutMs === undefined || !emitPartialOnTimeout) {
+			return [];
+		}
+		const output: MediaFrame[] = [];
+		for (const group of Array.from(pendingGroups.values())) {
+			if (now - group.createdAt < input.timeoutMs) {
+				continue;
+			}
+			pendingGroups.delete(group.sourceFrameId);
+			output.push(...(await emitGroup(group, 'partial')));
+		}
+		return output;
+	};
+
+	return {
+		edgeLabel: (_frame, output, outputFrame) => {
+			if (output.length === 0) {
+				return 'pending';
+			}
+			const status = outputFrame?.metadata?.mediaFanInStatus;
+			return status === 'complete' || status === 'partial'
+				? status
+				: 'joined';
+		},
+		flush: async () => {
+			if (!flushPartial) {
+				return [];
+			}
+			const output: MediaFrame[] = [];
+			for (const group of Array.from(pendingGroups.values())) {
+				pendingGroups.delete(group.sourceFrameId);
+				output.push(...(await emitGroup(group, 'partial')));
+			}
+			return output;
+		},
+		kind: 'processor',
+		name: input.name,
+		process: async (frame) => {
+			const now = Date.now();
+			const output = await emitTimedOutGroups(now);
+			const branch = input.branch?.(frame) ?? getMediaProcessorFrameBranch(frame);
+			if (branch === undefined || !expectedBranches.includes(branch)) {
+				return dropUnbranchedFrames ? output : [...output, frame];
+			}
+
+			const sourceFrameId =
+				input.sourceFrameId?.(frame) ?? getMediaProcessorFrameSourceId(frame);
+			const group =
+				pendingGroups.get(sourceFrameId) ??
+				({
+					branches: new Map<string, MediaFrame[]>(),
+					createdAt: now,
+					sourceFrameId
+				} satisfies PendingFanInGroup);
+			const frames = group.branches.get(branch) ?? [];
+			group.branches.set(branch, [...frames, frame]);
+			pendingGroups.set(sourceFrameId, group);
+
+			const hasAllBranches = expectedBranches.every((expected) =>
+				group.branches.has(expected)
+			);
+			if (!hasAllBranches) {
+				return output;
+			}
+
+			pendingGroups.delete(sourceFrameId);
+			output.push(...(await emitGroup(group, 'complete')));
 			return output;
 		}
 	};
