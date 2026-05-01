@@ -188,6 +188,28 @@ export type MediaProcessorTimingReport = {
 	totalNodeMs: number;
 };
 
+export type MediaProcessorGraphSnapshotNode = {
+	inputFormat?: AudioFormat;
+	kind: MediaProcessorNodeKind;
+	name: string;
+	outputFormat?: AudioFormat;
+};
+
+export type MediaProcessorGraphSnapshotLimits = {
+	maxInFlightFrames: number;
+	maxNodeProcessingMs: number;
+	maxQueuedFrames: number;
+};
+
+export type MediaProcessorGraphSnapshot = {
+	capturedAt: number;
+	limits: MediaProcessorGraphSnapshotLimits;
+	name: string;
+	nodes: readonly MediaProcessorGraphSnapshotNode[];
+	report: MediaProcessorGraphReport;
+	schema: 'absolute.media.processor-graph.snapshot.v1';
+};
+
 export type MediaProcessorBranchMode = 'all' | 'first';
 
 export type MediaProcessorBranchRoute = {
@@ -308,6 +330,7 @@ export type MediaProcessorGraph = {
 		frames: readonly MediaFrame[]
 	) => Promise<readonly MediaFrame[]>;
 	report: () => MediaProcessorGraphReport;
+	snapshot: () => MediaProcessorGraphSnapshot;
 	state: () => MediaProcessorGraphState;
 	timingEvents: () => readonly MediaProcessorTimingEvent[];
 };
@@ -1710,6 +1733,45 @@ export const buildMediaProcessorGraphReport = (input: {
 	};
 };
 
+const buildMediaProcessorGraphSnapshotNodes = (
+	nodes: readonly MediaProcessorNode[]
+): readonly MediaProcessorGraphSnapshotNode[] =>
+	nodes.map((node) => ({
+		inputFormat: node.inputFormat,
+		kind: node.kind ?? 'processor',
+		name: node.name,
+		outputFormat: node.outputFormat
+	}));
+
+export const buildMediaProcessorGraphSnapshot = (input: {
+	limits?: Partial<MediaProcessorGraphSnapshotLimits>;
+	name: string;
+	nodes: readonly MediaProcessorNode[];
+	report: MediaProcessorGraphReport;
+}): MediaProcessorGraphSnapshot => ({
+	capturedAt: Date.now(),
+	limits: {
+		maxInFlightFrames:
+			input.limits?.maxInFlightFrames ?? Number.POSITIVE_INFINITY,
+		maxNodeProcessingMs:
+			input.limits?.maxNodeProcessingMs ?? Number.POSITIVE_INFINITY,
+		maxQueuedFrames: input.limits?.maxQueuedFrames ?? Number.POSITIVE_INFINITY
+	},
+	name: input.name,
+	nodes: buildMediaProcessorGraphSnapshotNodes(input.nodes),
+	report: input.report,
+	schema: 'absolute.media.processor-graph.snapshot.v1'
+});
+
+export const parseMediaProcessorGraphSnapshot = (
+	snapshot: MediaProcessorGraphSnapshot
+): MediaProcessorGraphSnapshot => {
+	if (snapshot.schema !== 'absolute.media.processor-graph.snapshot.v1') {
+		throw new Error('Unsupported media processor graph snapshot schema.');
+	}
+	return snapshot;
+};
+
 const annotateMediaProcessorBranchFrame = (
 	frame: MediaFrame,
 	route: MediaProcessorBranchRoute,
@@ -2201,6 +2263,21 @@ export const createMediaProcessorGraph = (input: {
 		});
 	};
 
+	const report = () =>
+		buildMediaProcessorGraphReport({
+			backpressureEvents,
+			edgeEvents,
+			events,
+			lifecycleEvents,
+			maxInFlightFrames,
+			maxNodeProcessingMs,
+			maxQueuedFrames,
+			name: input.name ?? 'media-processor-graph',
+			nodes,
+			state,
+			timingEvents
+		});
+
 	return {
 		close: async () => {
 			while (queuedTasks.length > 0) {
@@ -2255,19 +2332,17 @@ export const createMediaProcessorGraph = (input: {
 			}
 			return output;
 		},
-		report: () =>
-			buildMediaProcessorGraphReport({
-				backpressureEvents,
-				edgeEvents,
-				events,
-				lifecycleEvents,
-				maxInFlightFrames,
-				maxNodeProcessingMs,
-				maxQueuedFrames,
+		report,
+		snapshot: () =>
+			buildMediaProcessorGraphSnapshot({
+				limits: {
+					maxInFlightFrames,
+					maxNodeProcessingMs,
+					maxQueuedFrames
+				},
 				name: input.name ?? 'media-processor-graph',
 				nodes,
-				state,
-				timingEvents
+				report: report()
 			}),
 		state: () => state,
 		timingEvents: () => timingEvents

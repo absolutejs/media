@@ -5,7 +5,8 @@ import {
 	createMediaFrame,
 	createMediaProcessorBranchRouter,
 	createMediaProcessorFanIn,
-	createMediaProcessorGraph
+	createMediaProcessorGraph,
+	parseMediaProcessorGraphSnapshot
 } from '../src';
 
 describe('processor graph lifecycle', () => {
@@ -379,6 +380,61 @@ describe('processor graph lifecycle', () => {
 			})
 		);
 		expect(report.status).toBe('warn');
+	});
+
+	test('exports and parses portable graph snapshots', async () => {
+		const graph = createMediaProcessorGraph({
+			maxInFlightFrames: 2,
+			maxNodeProcessingMs: 5,
+			maxQueuedFrames: 3,
+			name: 'snapshot-test',
+			nodes: [
+				{
+					inputFormat: {
+						channels: 1,
+						container: 'raw',
+						encoding: 'pcm_s16le',
+						sampleRateHz: 16_000
+					},
+					kind: 'processor',
+					name: 'passthrough',
+					outputFormat: {
+						channels: 1,
+						container: 'raw',
+						encoding: 'pcm_s16le',
+						sampleRateHz: 16_000
+					},
+					process: (frame) => frame
+				}
+			]
+		});
+
+		await graph.process(
+			createMediaFrame({
+				id: 'frame-1',
+				kind: 'input-audio',
+				source: 'browser'
+			})
+		);
+
+		const snapshot = graph.snapshot();
+		expect(snapshot.schema).toBe('absolute.media.processor-graph.snapshot.v1');
+		expect(snapshot.name).toBe('snapshot-test');
+		expect(snapshot.limits).toEqual({
+			maxInFlightFrames: 2,
+			maxNodeProcessingMs: 5,
+			maxQueuedFrames: 3
+		});
+		expect(snapshot.nodes).toEqual([
+			expect.objectContaining({
+				kind: 'processor',
+				name: 'passthrough'
+			})
+		]);
+		expect(snapshot.report.timingEvents).toHaveLength(1);
+		expect(snapshot.report.edgeEvents).toHaveLength(1);
+		expect(parseMediaProcessorGraphSnapshot(snapshot)).toEqual(snapshot);
+		expect(JSON.parse(JSON.stringify(snapshot))).toEqual(snapshot);
 	});
 
 	test('marks graph and node failures when a processor throws', async () => {
