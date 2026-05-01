@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { createMediaFrame, createMediaProcessorGraph } from '../src';
+import {
+	buildMediaProcessorBranchReports,
+	createMediaFrame,
+	createMediaProcessorBranchRouter,
+	createMediaProcessorGraph
+} from '../src';
 
 describe('processor graph lifecycle', () => {
 	test('records lifecycle events and drains buffered processors', async () => {
@@ -83,7 +88,7 @@ describe('processor graph lifecycle', () => {
 		]);
 
 		const report = graph.report();
-		expect(graph.edgeEvents()).toHaveLength(3);
+		expect(graph.edgeEvents()).toHaveLength(4);
 		expect(report.edges).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
@@ -111,6 +116,73 @@ describe('processor graph lifecycle', () => {
 			])
 		);
 		expect(report.status).toBe('warn');
+	});
+
+	test('routes frames through named media branches with branch reports', async () => {
+		const graph = createMediaProcessorGraph({
+			name: 'branch-router-test',
+			nodes: [
+				createMediaProcessorBranchRouter({
+					name: 'router',
+					routes: [
+						{
+							name: 'transcribe',
+							process: (frame) => ({
+								...frame,
+								id: `${frame.id}-transcribe`
+							}),
+							when: (frame) => frame.kind === 'input-audio'
+						},
+						{
+							name: 'record',
+							process: (frame) => ({
+								...frame,
+								id: `${frame.id}-record`
+							}),
+							when: (frame) => frame.source === 'telephony'
+						}
+					]
+				})
+			]
+		});
+
+		const output = await graph.process(
+			createMediaFrame({
+				id: 'call-frame-1',
+				kind: 'input-audio',
+				source: 'telephony'
+			})
+		);
+
+		expect(output.map((frame) => frame.id)).toEqual([
+			'call-frame-1-transcribe',
+			'call-frame-1-record'
+		]);
+		expect(output.map((frame) => frame.metadata?.mediaBranch)).toEqual([
+			'transcribe',
+			'record'
+		]);
+
+		const branchReports = buildMediaProcessorBranchReports({
+			node: 'router',
+			report: graph.report()
+		});
+		expect(branchReports).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					branch: 'transcribe',
+					emittedFrames: 1,
+					outputFrames: ['call-frame-1-transcribe'],
+					status: 'pass'
+				}),
+				expect.objectContaining({
+					branch: 'record',
+					emittedFrames: 1,
+					outputFrames: ['call-frame-1-record'],
+					status: 'pass'
+				})
+			])
+		);
 	});
 
 	test('marks graph and node failures when a processor throws', async () => {

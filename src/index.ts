@@ -111,6 +111,7 @@ export type MediaProcessorEdgeEvent = {
 	frameId: string;
 	from: string;
 	label?: string;
+	outputFrameId?: string;
 	outputFrameIds: readonly string[];
 	to: string;
 };
@@ -124,6 +125,25 @@ export type MediaProcessorEdgeReport = {
 	outputFrames: readonly string[];
 	status: MediaPipelineStatus;
 	to: string;
+};
+
+export type MediaProcessorBranchMode = 'all' | 'first';
+
+export type MediaProcessorBranchRoute = {
+	label?: string;
+	name: string;
+	process?: MediaProcessorNode['process'];
+	when?: (frame: MediaFrame) => boolean | Promise<boolean>;
+};
+
+export type MediaProcessorBranchReport = {
+	branch: string;
+	droppedFrames: number;
+	emittedFrames: number;
+	inputFrames: number;
+	node: string;
+	outputFrames: readonly string[];
+	status: MediaPipelineStatus;
 };
 
 export type MediaProcessorNodeReport = {
@@ -162,7 +182,8 @@ export type MediaProcessorNode = {
 		| string
 		| ((
 				input: MediaFrame,
-				output: readonly MediaFrame[]
+				output: readonly MediaFrame[],
+				outputFrame?: MediaFrame
 		  ) => string | undefined);
 	process: (
 		frame: MediaFrame
@@ -1260,10 +1281,11 @@ const normalizeProcessorFlushResult = (
 const getProcessorEdgeLabel = (
 	node: MediaProcessorNode,
 	input: MediaFrame,
-	output: readonly MediaFrame[]
+	output: readonly MediaFrame[],
+	outputFrame?: MediaFrame
 ): string | undefined => {
 	if (typeof node.edgeLabel === 'function') {
-		return node.edgeLabel(input, output);
+		return node.edgeLabel(input, output, outputFrame);
 	}
 	return node.edgeLabel;
 };
@@ -1307,6 +1329,50 @@ const buildMediaProcessorEdgeReports = (
 			status: droppedFrames > 0 && emittedFrames === 0 ? 'warn' : 'pass',
 			to: first.to
 		} satisfies MediaProcessorEdgeReport;
+	});
+};
+
+export const buildMediaProcessorBranchReports = (input: {
+	node: string;
+	report: Pick<MediaProcessorGraphReport, 'edgeEvents'>;
+}): readonly MediaProcessorBranchReport[] => {
+	const branchEvents = input.report.edgeEvents.filter(
+		(event) => event.from === input.node
+	);
+	const branches = new Map<string, MediaProcessorEdgeEvent[]>();
+
+	for (const event of branchEvents) {
+		const branch = event.label ?? 'default';
+		const events = branches.get(branch);
+		if (events === undefined) {
+			branches.set(branch, [event]);
+		} else {
+			events.push(event);
+		}
+	}
+
+	return Array.from(branches.entries()).map(([branch, events]) => {
+		const droppedFrames = events.reduce(
+			(total, event) => total + event.dropped,
+			0
+		);
+		const emittedFrames = events.reduce(
+			(total, event) => total + event.emitted,
+			0
+		);
+		const outputFrames = Array.from(
+			new Set(events.flatMap((event) => event.outputFrameIds))
+		);
+
+		return {
+			branch,
+			droppedFrames,
+			emittedFrames,
+			inputFrames: events.length,
+			node: input.node,
+			outputFrames,
+			status: droppedFrames > 0 && emittedFrames === 0 ? 'warn' : 'pass'
+		} satisfies MediaProcessorBranchReport;
 	});
 };
 
@@ -1392,6 +1458,82 @@ export const buildMediaProcessorGraphReport = (input: {
 		nodes,
 		state,
 		status: graphStatus
+	};
+};
+
+const annotateMediaProcessorBranchFrame = (
+	frame: MediaFrame,
+	route: MediaProcessorBranchRoute,
+	sourceFrame: MediaFrame
+): MediaFrame => ({
+	...frame,
+	metadata: {
+		...frame.metadata,
+		mediaBranch: route.label ?? route.name,
+		mediaBranchRoute: route.name,
+		mediaBranchSourceFrameId: sourceFrame.id
+	}
+});
+
+export const createMediaProcessorBranchRouter = (input: {
+	annotateFrames?: boolean;
+	mode?: MediaProcessorBranchMode;
+	name: string;
+	passthroughUnmatched?: boolean;
+	routes: readonly MediaProcessorBranchRoute[];
+}): MediaProcessorNode => {
+	const mode = input.mode ?? 'all';
+	const annotateFrames = input.annotateFrames ?? true;
+
+	return {
+		edgeLabel: (_frame, output, outputFrame) => {
+			if (output.length === 0) {
+				return 'unmatched';
+			}
+			const branch = outputFrame?.metadata?.mediaBranch;
+			return typeof branch === 'string' ? branch : undefined;
+		},
+		kind: 'branch',
+		name: input.name,
+		process: async (frame) => {
+			const selectedRoutes: MediaProcessorBranchRoute[] = [];
+			for (const route of input.routes) {
+				const matches = route.when === undefined || (await route.when(frame));
+				if (!matches) {
+					continue;
+				}
+				selectedRoutes.push(route);
+				if (mode === 'first') {
+					break;
+				}
+			}
+
+			if (selectedRoutes.length === 0) {
+				return input.passthroughUnmatched === true ? frame : undefined;
+			}
+
+			const output: MediaFrame[] = [];
+			for (const route of selectedRoutes) {
+				const routeOutput = normalizeProcessorResult(
+					frame,
+					route.process === undefined
+						? frame
+						: await route.process(frame)
+				);
+				output.push(
+					...(annotateFrames
+						? routeOutput.map((routeFrame) =>
+								annotateMediaProcessorBranchFrame(
+									routeFrame,
+									route,
+									frame
+								)
+							)
+						: routeOutput)
+				);
+			}
+			return output;
+		}
 	};
 };
 
@@ -1487,16 +1629,37 @@ export const createMediaProcessorGraph = (input: {
 					inputs: 1,
 					node: node.name
 				});
-				edgeEvents.push({
-					at: Date.now(),
-					dropped: output.length === 0 ? 1 : 0,
-					emitted: output.length,
-					frameId: current.id,
-					from: node.name,
-					label: getProcessorEdgeLabel(node, current, output),
-					outputFrameIds: output.map((frame) => frame.id),
-					to: nextNode?.name ?? 'output'
-				});
+				if (output.length === 0) {
+					edgeEvents.push({
+						at: Date.now(),
+						dropped: 1,
+						emitted: 0,
+						frameId: current.id,
+						from: node.name,
+						label: getProcessorEdgeLabel(node, current, output),
+						outputFrameIds: [],
+						to: nextNode?.name ?? 'output'
+					});
+				} else {
+					for (const outputFrame of output) {
+						edgeEvents.push({
+							at: Date.now(),
+							dropped: 0,
+							emitted: 1,
+							frameId: current.id,
+							from: node.name,
+							label: getProcessorEdgeLabel(
+								node,
+								current,
+								output,
+								outputFrame
+							),
+							outputFrameId: outputFrame.id,
+							outputFrameIds: [outputFrame.id],
+							to: nextNode?.name ?? 'output'
+						});
+					}
+				}
 				pushLifecycleEvent({
 					dropped: output.length === 0 ? 1 : 0,
 					emitted: output.length,
