@@ -160,6 +160,34 @@ export type MediaProcessorBackpressureReport = {
 	status: MediaPipelineStatus;
 };
 
+export type MediaProcessorTimingEvent = {
+	at: number;
+	durationMs: number;
+	frameId: string;
+	node: string;
+};
+
+export type MediaProcessorNodeTimingReport = {
+	averageMs: number;
+	events: readonly MediaProcessorTimingEvent[];
+	maxMs: number;
+	node: string;
+	overBudgetFrames: number;
+	status: MediaPipelineStatus;
+	totalMs: number;
+};
+
+export type MediaProcessorTimingReport = {
+	averageNodeMs: number;
+	events: readonly MediaProcessorTimingEvent[];
+	maxNodeMs: number;
+	maxNodeProcessingMs: number;
+	nodes: readonly MediaProcessorNodeTimingReport[];
+	overBudgetFrames: number;
+	status: MediaPipelineStatus;
+	totalNodeMs: number;
+};
+
 export type MediaProcessorBranchMode = 'all' | 'first';
 
 export type MediaProcessorBranchRoute = {
@@ -234,6 +262,8 @@ export type MediaProcessorGraphReport = {
 	nodes: readonly MediaProcessorNodeReport[];
 	state: MediaProcessorGraphState;
 	status: MediaPipelineStatus;
+	timing: MediaProcessorTimingReport;
+	timingEvents: readonly MediaProcessorTimingEvent[];
 };
 
 export type MediaProcessorNode = {
@@ -279,6 +309,7 @@ export type MediaProcessorGraph = {
 	) => Promise<readonly MediaFrame[]>;
 	report: () => MediaProcessorGraphReport;
 	state: () => MediaProcessorGraphState;
+	timingEvents: () => readonly MediaProcessorTimingEvent[];
 };
 
 export type MediaTransportAdapter = {
@@ -1437,6 +1468,63 @@ const buildMediaProcessorBackpressureReport = (input: {
 	};
 };
 
+const buildMediaProcessorTimingReport = (input: {
+	events?: readonly MediaProcessorTimingEvent[];
+	maxNodeProcessingMs?: number;
+	nodes: readonly MediaProcessorNode[];
+}): MediaProcessorTimingReport => {
+	const events = input.events ?? [];
+	const maxNodeProcessingMs =
+		input.maxNodeProcessingMs ?? Number.POSITIVE_INFINITY;
+	const nodeReports = input.nodes.map((node) => {
+		const nodeEvents = events.filter((event) => event.node === node.name);
+		const totalMs = nodeEvents.reduce(
+			(total, event) => total + event.durationMs,
+			0
+		);
+		const maxMs = nodeEvents.reduce(
+			(max, event) => Math.max(max, event.durationMs),
+			0
+		);
+		const overBudgetFrames = nodeEvents.filter(
+			(event) => event.durationMs > maxNodeProcessingMs
+		).length;
+
+		return {
+			averageMs: nodeEvents.length > 0 ? totalMs / nodeEvents.length : 0,
+			events: nodeEvents,
+			maxMs,
+			node: node.name,
+			overBudgetFrames,
+			status: overBudgetFrames > 0 ? 'warn' : 'pass',
+			totalMs
+		} satisfies MediaProcessorNodeTimingReport;
+	});
+	const totalNodeMs = events.reduce(
+		(total, event) => total + event.durationMs,
+		0
+	);
+	const maxNodeMs = events.reduce(
+		(max, event) => Math.max(max, event.durationMs),
+		0
+	);
+	const overBudgetFrames = nodeReports.reduce(
+		(total, report) => total + report.overBudgetFrames,
+		0
+	);
+
+	return {
+		averageNodeMs: events.length > 0 ? totalNodeMs / events.length : 0,
+		events,
+		maxNodeMs,
+		maxNodeProcessingMs,
+		nodes: nodeReports,
+		overBudgetFrames,
+		status: overBudgetFrames > 0 ? 'warn' : 'pass',
+		totalNodeMs
+	};
+};
+
 export const buildMediaProcessorBranchReports = (input: {
 	node: string;
 	report: Pick<MediaProcessorGraphReport, 'edgeEvents'>;
@@ -1519,16 +1607,24 @@ export const buildMediaProcessorGraphReport = (input: {
 	events?: readonly MediaProcessorNodeEvent[];
 	lifecycleEvents?: readonly MediaProcessorGraphLifecycleEvent[];
 	maxInFlightFrames?: number;
+	maxNodeProcessingMs?: number;
 	maxQueuedFrames?: number;
 	name: string;
 	nodes: readonly MediaProcessorNode[];
 	state?: MediaProcessorGraphState;
+	timingEvents?: readonly MediaProcessorTimingEvent[];
 }): MediaProcessorGraphReport => {
 	const backpressureEvents = input.backpressureEvents ?? [];
 	const backpressure = buildMediaProcessorBackpressureReport({
 		events: backpressureEvents,
 		maxInFlightFrames: input.maxInFlightFrames,
 		maxQueuedFrames: input.maxQueuedFrames
+	});
+	const timingEvents = input.timingEvents ?? [];
+	const timing = buildMediaProcessorTimingReport({
+		events: timingEvents,
+		maxNodeProcessingMs: input.maxNodeProcessingMs,
+		nodes: input.nodes
 	});
 	const events = input.events ?? [];
 	const edgeEvents = input.edgeEvents ?? [];
@@ -1588,6 +1684,7 @@ export const buildMediaProcessorGraphReport = (input: {
 			? 'fail'
 			: status === 'warn' ||
 				  backpressure.status === 'warn' ||
+				  timing.status === 'warn' ||
 				  edges.some((edge) => edge.status === 'warn')
 				? 'warn'
 				: 'pass';
@@ -1607,7 +1704,9 @@ export const buildMediaProcessorGraphReport = (input: {
 		name: input.name,
 		nodes,
 		state,
-		status: graphStatus
+		status: graphStatus,
+		timing,
+		timingEvents
 	};
 };
 
@@ -1849,6 +1948,7 @@ export const createMediaProcessorFanIn = (input: {
 export const createMediaProcessorGraph = (input: {
 	backpressureStrategy?: MediaProcessorBackpressureStrategy;
 	maxInFlightFrames?: number;
+	maxNodeProcessingMs?: number;
 	maxQueuedFrames?: number;
 	name?: string;
 	nodes?: readonly MediaProcessorNode[];
@@ -1862,8 +1962,11 @@ export const createMediaProcessorGraph = (input: {
 	const events: MediaProcessorNodeEvent[] = [];
 	const edgeEvents: MediaProcessorEdgeEvent[] = [];
 	const lifecycleEvents: MediaProcessorGraphLifecycleEvent[] = [];
+	const timingEvents: MediaProcessorTimingEvent[] = [];
 	const maxInFlightFrames =
 		input.maxInFlightFrames ?? Number.POSITIVE_INFINITY;
+	const maxNodeProcessingMs =
+		input.maxNodeProcessingMs ?? Number.POSITIVE_INFINITY;
 	const maxQueuedFrames = input.maxQueuedFrames ?? Number.POSITIVE_INFINITY;
 	const backpressureStrategy = input.backpressureStrategy ?? 'queue';
 	const queueOverflowStrategy = input.queueOverflowStrategy ?? 'drop';
@@ -1963,10 +2066,17 @@ export const createMediaProcessorGraph = (input: {
 			for (const current of frames) {
 				let output: readonly MediaFrame[];
 				try {
+					const nodeStartedAt = performance.now();
 					output = normalizeProcessorResult(
 						current,
 						await node.process(current)
 					);
+					timingEvents.push({
+						at: Date.now(),
+						durationMs: performance.now() - nodeStartedAt,
+						frameId: current.id,
+						node: node.name
+					});
 				} catch (error) {
 					setState('failed', 'node-error', {
 						error: error instanceof Error ? error.message : String(error),
@@ -2152,12 +2262,15 @@ export const createMediaProcessorGraph = (input: {
 				events,
 				lifecycleEvents,
 				maxInFlightFrames,
+				maxNodeProcessingMs,
 				maxQueuedFrames,
 				name: input.name ?? 'media-processor-graph',
 				nodes,
-				state
+				state,
+				timingEvents
 			}),
-		state: () => state
+		state: () => state,
+		timingEvents: () => timingEvents
 	};
 };
 

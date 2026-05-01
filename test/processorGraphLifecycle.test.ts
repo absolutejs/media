@@ -346,6 +346,41 @@ describe('processor graph lifecycle', () => {
 		expect(report.status).toBe('warn');
 	});
 
+	test('reports node processing timing and latency budget warnings', async () => {
+		const graph = createMediaProcessorGraph({
+			maxNodeProcessingMs: 0,
+			name: 'timing-test',
+			nodes: [
+				{
+					name: 'passthrough',
+					process: (frame) => frame
+				}
+			]
+		});
+
+		await graph.process(
+			createMediaFrame({
+				id: 'frame-1',
+				kind: 'input-audio',
+				source: 'browser'
+			})
+		);
+
+		const report = graph.report();
+		expect(graph.timingEvents()).toHaveLength(1);
+		expect(report.timing.events).toHaveLength(1);
+		expect(report.timing.maxNodeProcessingMs).toBe(0);
+		expect(report.timing.overBudgetFrames).toBe(1);
+		expect(report.timing.nodes[0]).toEqual(
+			expect.objectContaining({
+				node: 'passthrough',
+				overBudgetFrames: 1,
+				status: 'warn'
+			})
+		);
+		expect(report.status).toBe('warn');
+	});
+
 	test('marks graph and node failures when a processor throws', async () => {
 		const graph = createMediaProcessorGraph({
 			nodes: [
