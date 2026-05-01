@@ -77,9 +77,37 @@ export type MediaProcessorNodeEvent = {
 	node: string;
 };
 
+export type MediaProcessorGraphState =
+	| 'closed'
+	| 'draining'
+	| 'failed'
+	| 'idle'
+	| 'running';
+
+export type MediaProcessorGraphLifecycleEventKind =
+	| 'close'
+	| 'drain'
+	| 'error'
+	| 'node-error'
+	| 'process'
+	| 'start';
+
+export type MediaProcessorGraphLifecycleEvent = {
+	at: number;
+	dropped?: number;
+	emitted?: number;
+	error?: string;
+	frameId?: string;
+	inputs?: number;
+	kind: MediaProcessorGraphLifecycleEventKind;
+	node?: string;
+	state: MediaProcessorGraphState;
+};
+
 export type MediaProcessorNodeReport = {
 	droppedFrames: number;
 	emittedFrames: number;
+	errors: readonly MediaProcessorGraphLifecycleEvent[];
 	events: readonly MediaProcessorNodeEvent[];
 	inputFrames: number;
 	kind: MediaProcessorNodeKind;
@@ -91,10 +119,13 @@ export type MediaProcessorGraphReport = {
 	checkedAt: number;
 	droppedFrames: number;
 	emittedFrames: number;
+	errors: readonly MediaProcessorGraphLifecycleEvent[];
 	events: readonly MediaProcessorNodeEvent[];
 	inputFrames: number;
+	lifecycleEvents: readonly MediaProcessorGraphLifecycleEvent[];
 	name: string;
 	nodes: readonly MediaProcessorNodeReport[];
+	state: MediaProcessorGraphState;
 	status: MediaPipelineStatus;
 };
 
@@ -113,9 +144,17 @@ export type MediaProcessorNode = {
 		| Promise<
 				boolean | MediaFrame | readonly MediaFrame[] | undefined
 		  >;
+	flush?: () =>
+		| MediaFrame
+		| readonly MediaFrame[]
+		| undefined
+		| Promise<MediaFrame | readonly MediaFrame[] | undefined>;
 };
 
 export type MediaProcessorGraph = {
+	close: () => Promise<void>;
+	drain: () => Promise<readonly MediaFrame[]>;
+	events: () => readonly MediaProcessorGraphLifecycleEvent[];
 	nodes: readonly MediaProcessorNode[];
 	process: (
 		frame: MediaFrame
@@ -124,6 +163,7 @@ export type MediaProcessorGraph = {
 		frames: readonly MediaFrame[]
 	) => Promise<readonly MediaFrame[]>;
 	report: () => MediaProcessorGraphReport;
+	state: () => MediaProcessorGraphState;
 };
 
 export type MediaTransportAdapter = {
@@ -1174,14 +1214,33 @@ const normalizeProcessorResult = (
 	return [result as MediaFrame];
 };
 
+const normalizeProcessorFlushResult = (
+	result: MediaFrame | readonly MediaFrame[] | undefined
+): readonly MediaFrame[] => {
+	if (result === undefined) {
+		return [];
+	}
+	if (Array.isArray(result)) {
+		return result;
+	}
+	return [result as MediaFrame];
+};
+
 export const buildMediaProcessorGraphReport = (input: {
 	events?: readonly MediaProcessorNodeEvent[];
+	lifecycleEvents?: readonly MediaProcessorGraphLifecycleEvent[];
 	name: string;
 	nodes: readonly MediaProcessorNode[];
+	state?: MediaProcessorGraphState;
 }): MediaProcessorGraphReport => {
 	const events = input.events ?? [];
+	const lifecycleEvents = input.lifecycleEvents ?? [];
+	const graphErrors = lifecycleEvents.filter(
+		(event) => event.kind === 'error' || event.kind === 'node-error'
+	);
 	const nodes = input.nodes.map((node) => {
 		const nodeEvents = events.filter((event) => event.node === node.name);
+		const errors = graphErrors.filter((event) => event.node === node.name);
 		const droppedFrames = nodeEvents.reduce(
 			(total, event) => total + event.dropped,
 			0
@@ -1198,14 +1257,17 @@ export const buildMediaProcessorGraphReport = (input: {
 		return {
 			droppedFrames,
 			emittedFrames,
+			errors,
 			events: nodeEvents,
 			inputFrames,
 			kind: node.kind ?? 'processor',
 			name: node.name,
 			status:
-				inputFrames > 0 && emittedFrames === 0 && node.kind !== 'sink'
-					? 'warn'
-					: 'pass'
+				errors.length > 0
+					? 'fail'
+					: inputFrames > 0 && emittedFrames === 0 && node.kind !== 'sink'
+						? 'warn'
+						: 'pass'
 		} satisfies MediaProcessorNodeReport;
 	});
 	const inputFrames = events.filter(
@@ -1221,16 +1283,24 @@ export const buildMediaProcessorGraphReport = (input: {
 				.reduce((total, event) => total + event.emitted, 0)
 		: 0;
 	const status = nodes.some((node) => node.status === 'warn') ? 'warn' : 'pass';
+	const state = input.state ?? 'idle';
+	const graphStatus =
+		state === 'failed' || graphErrors.length > 0
+			? 'fail'
+			: status;
 
 	return {
 		checkedAt: Date.now(),
 		droppedFrames,
 		emittedFrames,
+		errors: graphErrors,
 		events,
 		inputFrames,
+		lifecycleEvents,
 		name: input.name,
 		nodes,
-		status
+		state,
+		status: graphStatus
 	};
 };
 
@@ -1240,23 +1310,95 @@ export const createMediaProcessorGraph = (input: {
 } = {}): MediaProcessorGraph => {
 	const nodes = input.nodes ?? [];
 	const events: MediaProcessorNodeEvent[] = [];
+	const lifecycleEvents: MediaProcessorGraphLifecycleEvent[] = [];
+	let state: MediaProcessorGraphState = 'idle';
+
+	const pushLifecycleEvent = (
+		event: Omit<MediaProcessorGraphLifecycleEvent, 'at' | 'state'> & {
+			state?: MediaProcessorGraphState;
+		}
+	) => {
+		lifecycleEvents.push({
+			...event,
+			at: Date.now(),
+			state: event.state ?? state
+		});
+	};
+
+	const setState = (
+		nextState: MediaProcessorGraphState,
+		kind: MediaProcessorGraphLifecycleEventKind,
+		event: Omit<
+			MediaProcessorGraphLifecycleEvent,
+			'at' | 'kind' | 'state'
+		> = {}
+	) => {
+		state = nextState;
+		pushLifecycleEvent({ ...event, kind, state: nextState });
+	};
 
 	const process = async (frame: MediaFrame) => {
+		if (state === 'closed') {
+			pushLifecycleEvent({
+				error: 'Cannot process frames after the media processor graph is closed.',
+				frameId: frame.id,
+				kind: 'error'
+			});
+			throw new Error(
+				'Cannot process frames after the media processor graph is closed.'
+			);
+		}
+		if (state === 'failed') {
+			pushLifecycleEvent({
+				error: 'Cannot process frames after the media processor graph has failed.',
+				frameId: frame.id,
+				kind: 'error'
+			});
+			throw new Error(
+				'Cannot process frames after the media processor graph has failed.'
+			);
+		}
+
+		if (lifecycleEvents.length === 0) {
+			setState('running', 'start', { frameId: frame.id, inputs: 1 });
+		} else if (state === 'idle') {
+			setState('running', 'process', { frameId: frame.id, inputs: 1 });
+		}
+
 		let frames: readonly MediaFrame[] = [frame];
 
 		for (const node of nodes) {
 			const nextFrames: MediaFrame[] = [];
 			for (const current of frames) {
-				const output = normalizeProcessorResult(
-					current,
-					await node.process(current)
-				);
+				let output: readonly MediaFrame[];
+				try {
+					output = normalizeProcessorResult(
+						current,
+						await node.process(current)
+					);
+				} catch (error) {
+					setState('failed', 'node-error', {
+						error: error instanceof Error ? error.message : String(error),
+						frameId: current.id,
+						inputs: 1,
+						node: node.name
+					});
+					throw error;
+				}
 				events.push({
 					at: Date.now(),
 					dropped: output.length === 0 ? 1 : 0,
 					emitted: output.length,
 					frameId: current.id,
 					inputs: 1,
+					node: node.name
+				});
+				pushLifecycleEvent({
+					dropped: output.length === 0 ? 1 : 0,
+					emitted: output.length,
+					frameId: current.id,
+					inputs: 1,
+					kind: 'process',
 					node: node.name
 				});
 				nextFrames.push(...output);
@@ -1267,10 +1409,48 @@ export const createMediaProcessorGraph = (input: {
 			}
 		}
 
+		if (state === 'running') {
+			state = 'idle';
+		}
 		return frames;
 	};
 
 	return {
+		close: async () => {
+			setState('closed', 'close');
+		},
+		drain: async () => {
+			if (state === 'closed') {
+				return [];
+			}
+			setState('draining', 'drain');
+			const flushedFrames: MediaFrame[] = [];
+			for (const node of nodes) {
+				if (node.flush === undefined) {
+					continue;
+				}
+				try {
+					const output = normalizeProcessorFlushResult(await node.flush());
+					flushedFrames.push(...output);
+					pushLifecycleEvent({
+						emitted: output.length,
+						kind: 'drain',
+						node: node.name
+					});
+				} catch (error) {
+					setState('failed', 'node-error', {
+						error: error instanceof Error ? error.message : String(error),
+						node: node.name
+					});
+					throw error;
+				}
+			}
+			if (state === 'draining') {
+				state = 'idle';
+			}
+			return flushedFrames;
+		},
+		events: () => lifecycleEvents,
 		nodes,
 		process,
 		processMany: async (frames) => {
@@ -1283,9 +1463,12 @@ export const createMediaProcessorGraph = (input: {
 		report: () =>
 			buildMediaProcessorGraphReport({
 				events,
+				lifecycleEvents,
 				name: input.name ?? 'media-processor-graph',
-				nodes
-			})
+				nodes,
+				state
+			}),
+		state: () => state
 	};
 };
 
