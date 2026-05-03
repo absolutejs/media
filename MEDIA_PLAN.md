@@ -1,12 +1,23 @@
 # AbsoluteJS Media Plan
 
-Last researched: April 30, 2026
+Last researched: May 3, 2026
 
 ## North Star
 
 Make `@absolutejs/media` the generic realtime media primitive layer for AbsoluteJS packages: frames, transports, processor graphs, calibration, quality reports, serializers, and browser/telephony media helpers that can power voice, video, avatars, meeting recorders, and future realtime products without forcing teams into Pipecat, LiveKit, or hosted media dashboards.
 
 `@absolutejs/media` is not a voice-agent product. `@absolutejs/voice` consumes media reports and turns them into voice-specific readiness, provider, telephony, operations-record, and proof-pack evidence. Voice product work stays in `../voice/VOICE_PLAN.md`.
+
+## Current Stopping Point
+
+Status as of May 3, 2026 UTC / May 2, 2026 EDT:
+
+- Published/local package version: `@absolutejs/media@0.0.1-beta.14`.
+- Media repo was clean before this plan refresh and was pushed at `75a8022`.
+- Voice consumes media through `@absolutejs/voice@0.0.22-beta.463`.
+- The real voice example installs `@absolutejs/media@0.0.1-beta.14` and passed a full isolated proof pack at `.voice-runtime/proof-pack/runtime/2026-05-03T02-31-37.685Z/proof-pack/latest.json`.
+- The latest proof pack proves media through voice-owned surfaces: media pipeline proof, browser media transport evidence, telephony media lifecycle evidence, realtime-channel runtime samples, operations-record links, failure replay, sustained proof trends, and production-readiness checks.
+- Repo state target: `media`, `voice`, `voice-adapters`, and the real voice example should be clean and pushed before taking a break.
 
 ## Package Boundary
 
@@ -35,7 +46,7 @@ Future package splits are only justified if the surface becomes independently us
 
 ## Current Surface
 
-Published package: `@absolutejs/media@0.0.1-beta.7`
+Published package: `@absolutejs/media@0.0.1-beta.14`
 
 Current primitives:
 
@@ -44,6 +55,11 @@ Current primitives:
 - `createMediaFrameTransformPipeline(...)`
 - `createMediaProcessorGraph(...)`
 - `buildMediaProcessorGraphReport(...)`
+- `buildMediaProcessorGraphSnapshot(...)`
+- `createMediaProcessorBranchRouter(...)`
+- `buildMediaProcessorBranchReports(...)`
+- `createMediaProcessorFanIn(...)`
+- `buildMediaProcessorFanInReport(...)`
 - `createMediaTransport(...)`
 - `buildMediaTransportReport(...)`
 - `buildMediaPipelineCalibrationReport(...)`
@@ -58,12 +74,14 @@ Current primitives:
 - `parseTelephonyMediaFrame(...)`
 - `serializeTelephonyMediaFrame(...)`
 - `createTelephonyMediaSerializer(...)`
+- `parseTelephonyStreamEvent(...)`
+- `buildMediaTelephonyStreamLifecycleReport(...)`
 
 Current proof consumption:
 
-- `@absolutejs/voice@0.0.22-beta.320` consumes `@absolutejs/media@0.0.1-beta.4` and persists browser `client.browser_media` traces through package-owned routes.
-- `absolutejs-voice-example` imports media primitives directly from `@absolutejs/media`.
-- Latest voice proof pack passed at `.voice-runtime/proof-pack/2026-04-30T09-03-51.415Z` with media quality status `pass` and browser WebRTC stats status `pass`: 1 active candidate pair, 1 live audio track, 0.001 packet-loss ratio, 80ms RTT, 8ms jitter, 240000 bytes received, and 210000 bytes sent.
+- `@absolutejs/voice@0.0.22-beta.463` consumes `@absolutejs/media@0.0.1-beta.14` and turns media reports into voice-owned readiness, operations-record, failure-replay, proof-trend, and proof-pack evidence.
+- `absolutejs-voice-example` imports media primitives directly from `@absolutejs/media` and passed the latest isolated proof-pack run at `.voice-runtime/proof-pack/runtime/2026-05-03T02-31-37.685Z/proof-pack/latest.json`.
+- Latest voice proof includes media pipeline evidence, browser media transport evidence, telephony media serializers/lifecycle evidence, realtime-channel runtime samples, production-readiness gates, and operations-record links.
 
 ## Competitor Target: Pipecat Media Depth
 
@@ -110,6 +128,17 @@ Acceptance criteria:
 - The report is generic enough for meeting recorders and non-voice realtime apps.
 - Voice can display quality issues without owning the quality calculation.
 
+Next independent media work:
+
+- Add compact Markdown/JSON artifact helpers for media quality reports so non-voice users can inspect failures without voice routes.
+- Add stable issue-code taxonomy for media quality failures so voice, future video, and future realtime packages can gate consistently.
+- Add fixture tests that model bad jitter, drift, silence, and backpressure separately instead of only happy-path aggregate reports.
+
+Combined voice/media work:
+
+- Voice should map media quality issue codes to production-readiness failures, operations-record warnings, and incident timeline entries.
+- Voice proof-pack output should include compact media artifacts, not raw verbose runtime internals.
+
 ## Priority 2: Transport Helpers
 
 Why this matters: Pipecat is strong because transports are first-class. AbsoluteJS needs clear browser/server transport primitives without hiding the runtime.
@@ -127,6 +156,15 @@ Acceptance criteria:
 
 - Apps can prove browser/server media flow without writing lifecycle bookkeeping.
 - Transport helpers remain generic and do not depend on voice sessions, providers, or assistants.
+
+Next independent media work:
+
+- Add browser/server WebSocket transport helpers that emit generic lifecycle and backpressure reports.
+- Add reconnect/resume report helpers that are transport-generic and do not assume voice sessions.
+
+Combined voice/media work:
+
+- Voice should consume transport reports in realtime-channel proof, reconnect proof, browser media proof, and operations records.
 
 ## Priority 3: WebRTC Helpers
 
@@ -147,6 +185,17 @@ Acceptance criteria:
 
 - A browser app can produce a useful media quality report from WebRTC stats.
 - The API does not force a hosted signaling service or voice-agent abstraction.
+
+Next independent media work:
+
+- Add richer inbound/outbound timing summaries on top of `getStats()` normalization.
+- Add continuity fixtures for interrupted, recovered, and one-way-audio streams.
+- Keep signaling optional unless repeated use proves a separate `@absolutejs/webrtc` package is justified.
+
+Combined voice/media work:
+
+- Voice should prefer real browser WebRTC/media stats when present, then fall back to deterministic proof envelopes.
+- Voice operations records should link browser media continuity failures to the affected session and proof artifact.
 
 ## Priority 4: Telephony Media Serializers
 
@@ -169,6 +218,16 @@ Acceptance criteria:
 - Carrier-specific stream packets become generic `MediaFrame`/transport events.
 - Voice telephony code no longer needs carrier media parsing logic outside media adapters.
 
+Next independent media work:
+
+- Expand lifecycle coverage beyond packet parsing: stream start/stop/error sequencing, byte-flow gaps, and codec/sample-rate mismatches.
+- Add carrier fixture coverage for malformed envelopes and out-of-order lifecycle events.
+
+Combined voice/media work:
+
+- Voice should keep carrier webhook/security/setup behavior in `@absolutejs/voice`, while media owns only generic stream envelope parsing and lifecycle reports.
+- Voice operations records should continue persisting live `client.telephony_media` evidence and attach media lifecycle failures to phone-agent readiness.
+
 ## Priority 5: Processor Graph Lifecycle
 
 Why this matters: current processor graphs prove ordered filter/branch/processor behavior. Pipecat-depth apps also need lifecycle, error, drain, and branch observability.
@@ -187,6 +246,17 @@ Acceptance criteria:
 - A failed processor node can produce actionable report evidence.
 - Long-running media graphs can be stopped/drained without losing final reports.
 
+Next independent media work:
+
+- Deepen snapshot/replay helpers so graph reports can be compactly stored and replayed without reprocessing full frame payloads.
+- Add explicit drain/flush tests for queued and branching graphs.
+- Add a small timeline renderer for graph lifecycle and edge events.
+
+Combined voice/media work:
+
+- Voice should surface graph failures in operations records, failure replay, media-pipeline proof, and production readiness.
+- Voice should not own graph lifecycle semantics; it should consume graph reports and decide buyer-facing impact.
+
 ## Priority 6: Debug And Artifact Helpers
 
 Why this matters: Pipecat has debugger/observability tooling. AbsoluteJS should answer with file-based, code-owned media artifacts that product packages can expose.
@@ -203,6 +273,17 @@ Acceptance criteria:
 
 - A developer can inspect a media failure without a hosted dashboard.
 - Artifacts are generic enough for voice and non-voice examples.
+
+Next independent media work:
+
+- Add `renderMediaQualityMarkdown(...)`, `renderMediaTransportMarkdown(...)`, and `renderMediaProcessorGraphMarkdown(...)` or equivalent compact renderers.
+- Add redaction hooks for metadata-heavy media reports.
+- Add artifact writer helpers that can be reused by voice proof-pack and future media examples.
+
+Combined voice/media work:
+
+- Voice proof packs should include these compact renderers so the final artifact is readable and not dominated by raw realtime-channel internals.
+- Voice incident timelines should link to media artifacts when a call has jitter, drift, backpressure, one-way audio, stream lifecycle, or graph failures.
 
 ## Integration Contract With Voice
 
