@@ -1,5 +1,3 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import type { AudioFormat } from './types';
 
 export type MediaFrameKind =
@@ -3571,6 +3569,8 @@ export const buildMediaProcessorGraphArtifact = (
 export const writeMediaArtifact = async <TSummary, TJson>(
 	input: MediaArtifactWriteInput<TSummary, TJson>
 ): Promise<MediaArtifactWriteResult<TSummary>> => {
+	const { mkdir, writeFile } = await import('node:fs/promises');
+	const { join } = await import('node:path');
 	await mkdir(input.dir, { recursive: true });
 	const jsonPath = join(input.dir, `${input.slug}.json`);
 	const markdownPath = join(input.dir, `${input.slug}.md`);
