@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { AudioFormat } from './types';
 
 export type MediaFrameKind =
@@ -3130,5 +3132,455 @@ export const buildMediaPipelineCalibrationReport = (
 		surface: input.surface ?? 'media-pipeline',
 		traceLinkedFrames,
 		turnCommitFrames: turnCommitFrames.length
+	};
+};
+
+export type MediaArtifactRedactionMode = 'mask' | 'omit';
+
+export type MediaArtifactRedactionOptions = {
+	maskValue?: string;
+	metadataAllow?: readonly string[];
+	metadataDeny?: readonly string[];
+	mode?: MediaArtifactRedactionMode;
+	truncateArraysAt?: number;
+};
+
+export type MediaArtifactRenderOptions = {
+	redact?: MediaArtifactRedactionOptions;
+	title?: string;
+};
+
+export type MediaQualitySummary = {
+	backpressureEvents: number;
+	description: string;
+	driftMs?: number;
+	frameCount: number;
+	gapCount: number;
+	issueCodes: readonly string[];
+	issueCount: number;
+	jitterMs?: number;
+	silenceRatio: number;
+	speechRatio: number;
+	status: MediaPipelineStatus;
+};
+
+export type MediaTransportSummary = {
+	backpressureEvents: number;
+	description: string;
+	errors: number;
+	inputFrames: number;
+	lastEventKind?: MediaTransportEventKind;
+	name: string;
+	outputFrames: number;
+	state: MediaTransportState;
+	status: MediaPipelineStatus;
+};
+
+export type MediaProcessorGraphSummary = {
+	backpressureEvents: number;
+	description: string;
+	droppedFrames: number;
+	edgeCount: number;
+	edgeEventCount: number;
+	emittedFrames: number;
+	errorCount: number;
+	inputFrames: number;
+	issueCodes: readonly string[];
+	lifecycleEventCount: number;
+	name: string;
+	nodeCount: number;
+	state: MediaProcessorGraphState;
+	status: MediaPipelineStatus;
+	timingMaxMs: number;
+};
+
+export type MediaArtifactPair<TSummary, TJson = unknown> = {
+	json: string;
+	jsonValue: TJson;
+	markdown: string;
+	summary: TSummary;
+};
+
+export type MediaArtifactWriteInput<TSummary, TJson = unknown> = MediaArtifactPair<
+	TSummary,
+	TJson
+> & {
+	dir: string;
+	slug: string;
+};
+
+export type MediaArtifactWriteResult<TSummary> = {
+	jsonPath: string;
+	markdownPath: string;
+	summary: TSummary;
+};
+
+const DEFAULT_METADATA_DENY: readonly string[] = [
+	'audioPayload',
+	'auth',
+	'authorization',
+	'cookie',
+	'email',
+	'phone',
+	'phoneNumber',
+	'rawPayload',
+	'secret',
+	'token',
+	'transcript',
+	'utterance'
+];
+
+const DEFAULT_TRUNCATE = 8;
+
+const issueCodes = (issues: readonly MediaPipelineCalibrationIssue[]) =>
+	Array.from(new Set(issues.map((issue) => issue.code)));
+
+const lastEventKind = (
+	events: readonly MediaTransportEvent[]
+): MediaTransportEventKind | undefined => events[events.length - 1]?.kind;
+
+const formatOptionalMs = (value: number | undefined): string =>
+	value === undefined ? 'n/a' : `${String(Math.round(value))}ms`;
+
+const formatRatio = (value: number): string =>
+	`${(value * 100).toFixed(1)}%`;
+
+const escapeMarkdownCell = (value: string): string =>
+	value.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+
+const renderIssuesTable = (
+	issues: readonly MediaPipelineCalibrationIssue[]
+): string => {
+	if (issues.length === 0) {
+		return '- No issues.\n';
+	}
+	const rows = issues
+		.map(
+			(issue) =>
+				`| ${issue.severity} | ${escapeMarkdownCell(issue.code)} | ${escapeMarkdownCell(issue.message)} |`
+		)
+		.join('\n');
+	return `| Severity | Code | Message |\n| --- | --- | --- |\n${rows}\n`;
+};
+
+export const summarizeMediaQualityReport = (
+	report: MediaQualityReport
+): MediaQualitySummary => ({
+	backpressureEvents: report.backpressureEvents,
+	description: `${report.totalFrames} frame(s), ${report.gapCount} gap(s), speech ${formatRatio(report.speechRatio)}, status ${report.status}.`,
+	driftMs: report.timestampDriftMs,
+	frameCount: report.totalFrames,
+	gapCount: report.gapCount,
+	issueCodes: issueCodes(report.issues),
+	issueCount: report.issues.length,
+	jitterMs: report.jitterMs,
+	silenceRatio: report.silenceRatio,
+	speechRatio: report.speechRatio,
+	status: report.status
+});
+
+export const summarizeMediaTransportReport = (
+	report: MediaTransportReport
+): MediaTransportSummary => ({
+	backpressureEvents: report.backpressureEvents,
+	description: `${report.name}: ${report.state}, in ${report.inputFrames}, out ${report.outputFrames}, backpressure ${report.backpressureEvents}.`,
+	errors: report.events.filter((event) => event.kind === 'error').length,
+	inputFrames: report.inputFrames,
+	lastEventKind: lastEventKind(report.events),
+	name: report.name,
+	outputFrames: report.outputFrames,
+	state: report.state,
+	status: report.status
+});
+
+export const summarizeMediaProcessorGraphReport = (
+	report: MediaProcessorGraphReport
+): MediaProcessorGraphSummary => {
+	const errorIssueCodes = Array.from(
+		new Set(report.errors.map((event) => event.kind))
+	);
+	return {
+		backpressureEvents: report.backpressure.events.length,
+		description: `${report.name}: ${report.state}, ${report.nodes.length} node(s), in ${report.inputFrames}, out ${report.emittedFrames}, dropped ${report.droppedFrames}.`,
+		droppedFrames: report.droppedFrames,
+		edgeCount: report.edges.length,
+		edgeEventCount: report.edgeEvents.length,
+		emittedFrames: report.emittedFrames,
+		errorCount: report.errors.length,
+		inputFrames: report.inputFrames,
+		issueCodes: errorIssueCodes,
+		lifecycleEventCount: report.lifecycleEvents.length,
+		name: report.name,
+		nodeCount: report.nodes.length,
+		state: report.state,
+		status: report.status,
+		timingMaxMs: report.timing.maxNodeMs
+	};
+};
+
+export const renderMediaQualityMarkdown = (
+	report: MediaQualityReport,
+	options: MediaArtifactRenderOptions = {}
+): string => {
+	const title = options.title ?? 'Media Quality Report';
+	const lines = [
+		`# ${title}`,
+		'',
+		`Status: **${report.status}**`,
+		'',
+		'| Metric | Value |',
+		'| --- | ---: |',
+		`| Total frames | ${report.totalFrames} |`,
+		`| Input audio | ${report.inputAudioFrames} |`,
+		`| Assistant audio | ${report.assistantAudioFrames} |`,
+		`| Gaps | ${report.gapCount} |`,
+		`| Jitter | ${formatOptionalMs(report.jitterMs)} |`,
+		`| Timestamp drift | ${formatOptionalMs(report.timestampDriftMs)} |`,
+		`| Speech ratio | ${formatRatio(report.speechRatio)} |`,
+		`| Silence ratio | ${formatRatio(report.silenceRatio)} |`,
+		`| Backpressure events | ${report.backpressureEvents} |`,
+		'',
+		'## Issues',
+		'',
+		renderIssuesTable(report.issues).trimEnd()
+	];
+	return `${lines.join('\n')}\n`;
+};
+
+export const renderMediaTransportMarkdown = (
+	report: MediaTransportReport,
+	options: MediaArtifactRenderOptions = {}
+): string => {
+	const title = options.title ?? `Media Transport: ${report.name}`;
+	const limit = options.redact?.truncateArraysAt ?? DEFAULT_TRUNCATE;
+	const events = report.events.slice(-limit);
+	const eventRows =
+		events.length === 0
+			? '- No transport events recorded.'
+			: ['| At | Kind | State | Buffered | Error |', '| --- | --- | --- | ---: | --- |']
+					.concat(
+						events.map(
+							(event) =>
+								`| ${event.at} | ${event.kind} | ${event.state} | ${
+									event.bufferedFrames ?? ''
+								} | ${escapeMarkdownCell(event.error ?? '')} |`
+						)
+					)
+					.join('\n');
+	const lines = [
+		`# ${title}`,
+		'',
+		`Status: **${report.status}** · State: **${report.state}**`,
+		'',
+		'| Metric | Value |',
+		'| --- | ---: |',
+		`| Input frames | ${report.inputFrames} |`,
+		`| Output frames | ${report.outputFrames} |`,
+		`| Backpressure events | ${report.backpressureEvents} |`,
+		`| Connected | ${report.connected ? 'yes' : 'no'} |`,
+		`| Closed | ${report.closed ? 'yes' : 'no'} |`,
+		`| Failed | ${report.failed ? 'yes' : 'no'} |`,
+		'',
+		`## Last ${events.length} event(s)`,
+		'',
+		eventRows
+	];
+	return `${lines.join('\n')}\n`;
+};
+
+export const renderMediaProcessorGraphMarkdown = (
+	report: MediaProcessorGraphReport,
+	options: MediaArtifactRenderOptions = {}
+): string => {
+	const title = options.title ?? `Media Processor Graph: ${report.name}`;
+	const limit = options.redact?.truncateArraysAt ?? DEFAULT_TRUNCATE;
+	const nodeRows = report.nodes
+		.map(
+			(node) =>
+				`| ${escapeMarkdownCell(node.name)} | ${node.kind} | ${node.status} | ${node.inputFrames} | ${node.emittedFrames} | ${node.droppedFrames} | ${node.errors.length} |`
+		)
+		.join('\n');
+	const edgeRows = report.edges
+		.slice(0, limit)
+		.map(
+			(edge) =>
+				`| ${escapeMarkdownCell(edge.from)} | ${escapeMarkdownCell(edge.to)} | ${edge.status} | ${edge.emittedFrames} |`
+		)
+		.join('\n');
+	const issues = report.errors.map(
+		(event): MediaPipelineCalibrationIssue => ({
+			code: event.kind,
+			message: event.error ?? `Processor graph ${event.kind} (state ${event.state}).`,
+			severity: 'error'
+		})
+	);
+	const lines = [
+		`# ${title}`,
+		'',
+		`Status: **${report.status}** · State: **${report.state}**`,
+		'',
+		'| Metric | Value |',
+		'| --- | ---: |',
+		`| Nodes | ${report.nodes.length} |`,
+		`| Input frames | ${report.inputFrames} |`,
+		`| Emitted frames | ${report.emittedFrames} |`,
+		`| Dropped frames | ${report.droppedFrames} |`,
+		`| Lifecycle events | ${report.lifecycleEvents.length} |`,
+		`| Edge events | ${report.edgeEvents.length} |`,
+		`| Backpressure events | ${report.backpressure.events.length} |`,
+		`| Timing max | ${formatOptionalMs(report.timing.maxNodeMs)} |`,
+		`| Timing average | ${formatOptionalMs(report.timing.averageNodeMs)} |`,
+		'',
+		'## Nodes',
+		'',
+		nodeRows
+			? `| Node | Kind | Status | In | Out | Dropped | Errors |\n| --- | --- | --- | ---: | ---: | ---: | ---: |\n${nodeRows}`
+			: '- No nodes.',
+		'',
+		`## Edges (showing up to ${limit})`,
+		'',
+		edgeRows
+			? `| From | To | Status | Frames |\n| --- | --- | --- | ---: |\n${edgeRows}`
+			: '- No edges.',
+		'',
+		'## Errors',
+		'',
+		renderIssuesTable(issues).trimEnd()
+	];
+	return `${lines.join('\n')}\n`;
+};
+
+const truncateArrays = (
+	value: unknown,
+	limit: number,
+	seen: WeakSet<object>
+): unknown => {
+	if (Array.isArray(value)) {
+		const head = value.slice(0, limit).map((entry) => truncateArrays(entry, limit, seen));
+		if (value.length > limit) {
+			return [...head, { truncated: value.length - limit }];
+		}
+		return head;
+	}
+	if (value && typeof value === 'object') {
+		if (seen.has(value as object)) return value;
+		seen.add(value as object);
+		const next: Record<string, unknown> = {};
+		for (const [key, entry] of Object.entries(value)) {
+			next[key] = truncateArrays(entry, limit, seen);
+		}
+		return next;
+	}
+	return value;
+};
+
+const applyRedaction = (
+	value: unknown,
+	options: MediaArtifactRedactionOptions,
+	seen: WeakSet<object>
+): unknown => {
+	const mode = options.mode ?? 'omit';
+	const maskValue = options.maskValue ?? '[redacted]';
+	const allow = new Set(options.metadataAllow ?? []);
+	const deny = new Set(options.metadataDeny ?? DEFAULT_METADATA_DENY);
+	const walk = (input: unknown): unknown => {
+		if (Array.isArray(input)) {
+			return input.map((entry) => walk(entry));
+		}
+		if (input && typeof input === 'object') {
+			if (seen.has(input as object)) return input;
+			seen.add(input as object);
+			const next: Record<string, unknown> = {};
+			for (const [key, entry] of Object.entries(input)) {
+				if (allow.has(key)) {
+					next[key] = entry;
+					continue;
+				}
+				if (deny.has(key)) {
+					if (mode === 'mask') next[key] = maskValue;
+					continue;
+				}
+				next[key] = walk(entry);
+			}
+			return next;
+		}
+		return input;
+	};
+	return walk(value);
+};
+
+export const redactMediaReport = <T>(
+	report: T,
+	options: MediaArtifactRedactionOptions = {}
+): T => {
+	const limit = options.truncateArraysAt ?? DEFAULT_TRUNCATE;
+	const truncated = truncateArrays(report, limit, new WeakSet());
+	return applyRedaction(truncated, options, new WeakSet()) as T;
+};
+
+const buildArtifactPair = <TReport, TSummary>(
+	report: TReport,
+	summary: TSummary,
+	markdown: string,
+	options: MediaArtifactRenderOptions
+): MediaArtifactPair<TSummary, TReport> => {
+	const jsonValue = options.redact
+		? redactMediaReport(report, options.redact)
+		: report;
+	return {
+		json: JSON.stringify(jsonValue, null, 2),
+		jsonValue,
+		markdown,
+		summary
+	};
+};
+
+export const buildMediaQualityArtifact = (
+	report: MediaQualityReport,
+	options: MediaArtifactRenderOptions = {}
+): MediaArtifactPair<MediaQualitySummary, MediaQualityReport> =>
+	buildArtifactPair(
+		report,
+		summarizeMediaQualityReport(report),
+		renderMediaQualityMarkdown(report, options),
+		options
+	);
+
+export const buildMediaTransportArtifact = (
+	report: MediaTransportReport,
+	options: MediaArtifactRenderOptions = {}
+): MediaArtifactPair<MediaTransportSummary, MediaTransportReport> =>
+	buildArtifactPair(
+		report,
+		summarizeMediaTransportReport(report),
+		renderMediaTransportMarkdown(report, options),
+		options
+	);
+
+export const buildMediaProcessorGraphArtifact = (
+	report: MediaProcessorGraphReport,
+	options: MediaArtifactRenderOptions = {}
+): MediaArtifactPair<MediaProcessorGraphSummary, MediaProcessorGraphReport> =>
+	buildArtifactPair(
+		report,
+		summarizeMediaProcessorGraphReport(report),
+		renderMediaProcessorGraphMarkdown(report, options),
+		options
+	);
+
+export const writeMediaArtifact = async <TSummary, TJson>(
+	input: MediaArtifactWriteInput<TSummary, TJson>
+): Promise<MediaArtifactWriteResult<TSummary>> => {
+	await mkdir(input.dir, { recursive: true });
+	const jsonPath = join(input.dir, `${input.slug}.json`);
+	const markdownPath = join(input.dir, `${input.slug}.md`);
+	await Promise.all([
+		writeFile(jsonPath, input.json, 'utf8'),
+		writeFile(markdownPath, input.markdown, 'utf8')
+	]);
+	return {
+		jsonPath,
+		markdownPath,
+		summary: input.summary
 	};
 };
