@@ -9,11 +9,13 @@ We are continuing AbsoluteJS Media from /home/alexkahn/abs/media. First read MED
 ## Current State
 
 - Media repo: `/home/alexkahn/abs/media`
-- Current package: `@absolutejs/media@0.0.1-beta.14`
-- Latest pushed media commit before this pickup file: `663d02e Update media stopping point plan`
-- Voice consumer: `/home/alexkahn/abs/voice`
+- Current package: `@absolutejs/media@0.0.1-beta.16`
+- Latest pushed media commit: `527840a Make writeMediaArtifact lazy-load node:fs to keep browser bundles parseable`
+- Voice consumer: `/home/alexkahn/abs/voice` (now externalizes `@absolutejs/media`, see voice@0.0.22-beta.465)
 - Real example consumer: `/home/alexkahn/alex/absolutejs-voice-example`
-- Latest voice proof consuming media passed at `.voice-runtime/proof-pack/runtime/2026-05-03T02-31-37.685Z/proof-pack/latest.json`.
+- Latest voice proof consuming media passed at `.voice-runtime/proof-pack/runtime/2026-05-18T23-42-25.003Z/proof-pack/latest.json` with mediaPipelineCalibrationAssertion summary at ~1.7 KB (down from ~35 KB) and per-report media artifacts persisted alongside.
+- New public API: `summarizeMedia{Quality,Transport,ProcessorGraph}Report`, `renderMedia{Quality,Transport,ProcessorGraph}Markdown`, `buildMedia{Quality,Transport,ProcessorGraph}Artifact`, `writeMediaArtifact`, `redactMediaReport`.
+- `writeMediaArtifact` lazy-imports `node:fs/promises`/`node:path` so the function can ship in browser bundles without breaking parse. Server callers see no behavioral change.
 
 ## Boundary
 
