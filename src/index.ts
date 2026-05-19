@@ -1,5 +1,27 @@
 import type { AudioFormat } from './types';
 
+export {
+	applyAudioRedaction,
+	mergeAudioRedactionRanges
+} from './audioRedaction';
+export type {
+	AudioRedactionFill,
+	AudioRedactionOptions,
+	AudioRedactionRange
+} from './audioRedaction';
+export {
+	composeNoiseSuppressors,
+	createEnergyGateNoiseSuppressor,
+	createPassThroughNoiseSuppressor
+} from './noiseSuppression';
+export type {
+	ComposeNoiseSuppressorsOptions,
+	EnergyGateNoiseSuppressorOptions,
+	NoiseSuppressor,
+	NoiseSuppressorInput,
+	NoiseSuppressorOutput
+} from './noiseSuppression';
+
 export type MediaFrameKind =
 	| 'assistant-audio'
 	| 'input-audio'
