@@ -29,6 +29,16 @@ export type {
 	FFmpegSpawnFn,
 	FFmpegSpawnInput
 } from './ffmpegNoiseSuppressor';
+export {
+	createFrameProcessorNoiseSuppressor,
+	createKrispNoiseSuppressor
+} from './frameProcessorNoiseSuppressor';
+export type {
+	CreateFrameProcessorNoiseSuppressorOptions,
+	CreateKrispNoiseSuppressorOptions,
+	KrispFrameProcessor,
+	NoiseSuppressionFrameProcessor
+} from './frameProcessorNoiseSuppressor';
 
 export type MediaFrameKind =
 	| 'assistant-audio'
