@@ -4,6 +4,30 @@
 
 It owns generic media frame, transport, processor graph, calibration, resampling, speech activity, and interruption reports. Product-specific voice routes, readiness gates, provider orchestration, operations records, and proof-pack integrations stay in `@absolutejs/voice`.
 
+## Installation
+
+```sh
+bun add @absolutejs/media
+```
+
+## Media frames
+
+```ts
+import { createMediaFrame } from '@absolutejs/media';
+
+const pcmBytes = new Uint8Array(320);
+const frame = createMediaFrame({
+	at: Date.now(),
+	audio: pcmBytes,
+	durationMs: 20,
+	id: 'frame-1',
+	kind: 'input-audio',
+	source: 'browser'
+});
+```
+
+Use transports and processor graphs to move and transform frames, then build calibration, VAD, interruption, quality, WebRTC, and continuity reports at the boundaries your application operates.
+
 See `MEDIA_PLAN.md` for the media runtime roadmap. Voice-specific product needs live in `../voice/VOICE_PLAN.md`.
 
 ## What's new
